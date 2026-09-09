@@ -1,120 +1,264 @@
-# omalab
+![omalab — a disposable Omarchy desktop for plugin development](assets/header.svg)
 
-A throwaway Omarchy desktop for developing shell plugins.
+**Develop shell plugins against a real Omarchy desktop without restarting your own.**
 
-`omalab up ~/src/myplugin` starts a second Omarchy — real Hyprland, real
-`omarchy-shell`, real theme — with your plugin checkout loaded and nothing
-else of yours touched. It runs on a headless output, so your desktop never
-flickers, restarts, or loses its notification daemon while you work. Bring it
-onto your screen when you want to look, screenshot it at any size and scale
-when you want a picture, throw it away when the idea did not work out.
+`omalab` runs the installed Hyprland compositor and Omarchy shell around your
+plugin checkout, with disposable configuration, state and session services.
+It starts offscreen. Bring it into view deliberately, capture native-resolution
+screenshots, send plugin IPC, and remove the lab when you are finished.
+
+This is a development environment, **not a sandbox for untrusted code**.
+
+[Quick start](#quick-start) · [Commands](#commands) · [Isolation](#isolation-boundaries)
+· [CI](docs/CI.md) · [Engineering reference](docs/HOW.md) · [Agent skill](skills/omalab/SKILL.md)
+
+## Requirements
+
+- Linux with an installed **Omarchy desktop and a running Hyprland Wayland session**.
+- The session's normal user, environment and access to its compositor sockets.
+- Hyprland, Quickshell, PipeWire, D-Bus, grim, jq, Git and the standard shell
+  utilities supplied by Omarchy. No additional runtime package or root access
+  is needed on the verified installation.
+
+Verified with Omarchy **4.0.2**, Hyprland **0.56.2**, Quickshell **0.3.1** and
+PipeWire **1.6.8**. The CLI depends on Omarchy's shell/plugin API and Hyprland's
+Lua API; other versions are not yet a compatibility guarantee.
+
+> **Offscreen is not desktop-free.** A lab needs an existing host compositor.
+> A stock GitHub-hosted Linux runner, a plain container, or a machine with only
+> an SSH session cannot run the graphical workflow as-is.
 
 ## Install
 
 ```sh
-git clone https://github.com/njpatel/omalab ~/src/omalab
-ln -s ~/src/omalab/bin/omalab ~/.local/bin/omalab
+git clone https://github.com/njpatel/omalab.git "$HOME/.local/share/omalab"
+mkdir -p "$HOME/.local/bin"
+ln -s "$HOME/.local/share/omalab/bin/omalab" "$HOME/.local/bin/omalab"
+omalab --help
 ```
 
-Needs Omarchy's Hyprland, Quickshell, PipeWire, grim, jq, D-Bus, Git and standard
-shell utilities. No root or additional runtime packages. Lab state lives under
-`$XDG_RUNTIME_DIR/omalab/`; screenshots go to the file you choose.
+Ensure `~/.local/bin` is on `PATH`. Keep the checkout intact: the executable
+locates the bundled stamp plugin relative to itself. There is no build step.
 
-Verified with **Hyprland 0.56.2 and Quickshell 0.3.1** and the current Omarchy
-shell plugin API. Both host and child use Hyprland's Lua configuration API.
-Other versions are not yet verified.
+To update, pull the checkout with `git pull --ff-only`. Recreate existing labs
+after an update; `restart` reloads the lab shell, not its compositor or generated
+environment.
 
-## Use
+## Quick start
 
+Run these commands from a terminal inside your Omarchy session. The plugin
+directory must contain a valid Omarchy `manifest.json`.
+
+```sh
+cd ~/src/my-plugin
+omalab up . -n dev
+omalab ipc -n dev shell listPlugins
+mkdir -p artifacts
+omalab shot -n dev artifacts/preview.png
 ```
+
+The checkout is **symlinked, not copied**. The lab starts with the stock bar,
+Tokyo Night theme and wallpaper, your plugin, and a provenance stamp. Bar
+widgets go into their manifest's `barWidget.defaultSection`; service plugins
+are enabled without needing a bar slot.
+
+Only show it when you want a visible window:
+
+```sh
+omalab show -n dev
+omalab hide -n dev
+```
+
+After editing your checkout:
+
+```sh
+omalab restart -n dev
+omalab shot -n dev artifacts/updated.png
+omalab log -n dev
+```
+
+Finish by removing only that lab:
+
+```sh
+omalab down -n dev
+```
+
+`down` deletes the lab's private state. Save screenshots, logs and any useful
+fixtures first. If `up` fails, its diagnostic files remain until `down`.
+
+## Settings, fixtures and services
+
+The lab deliberately starts without your desktop's plugin configuration,
+credential files, application history or cached data. A plugin displaying
+"not configured", "sign in" or "no data" can be behaving correctly. That does
+not make a QML TypeError or binding loop an expected condition: read the log.
+
+Use `exec` to configure or inspect the **lab's** environment:
+
+```sh
+omalab exec -n dev printenv HOME XDG_CONFIG_HOME XDG_STATE_HOME
+omalab exec -n dev sh -c 'cat "$HOME/.config/omarchy/shell.json"'
+omalab exec -n dev bash
+```
+
+The last command opens a shell in your current terminal, with the lab's
+HOME, display, session bus and audio connection. Use it for plugin setup,
+test fixtures or plugin-specific commands. It is not a container: the working
+directory and the rest of the filesystem remain accessible.
+
+Quote variables when expansion must happen inside the lab. In the example
+above, single quotes prevent your outer shell from expanding its own `$HOME`.
+Do not automatically copy production credentials into a disposable lab.
+
+Additional plugins must already be installed on the machine:
+
+```sh
+omalab up . -n integration --plus omarchy.notifications
+```
+
+The built-in notification service is **off by default**, leaving its private
+bus name available to notification-service plugins. Enable the stock service
+only when it is the one you want. Other service dependencies, test data and
+backend processes belong to your plugin's setup; omalab does not invent or
+start them for you.
+
+## Screenshots
+
+```sh
+omalab shot -n dev artifacts/preview.png
+omalab shot -n dev artifacts/large.png --size 1600x1000
+omalab shot -n dev artifacts/retina.png --size 1280x800 --scale 2
+```
+
+Sizes are **logical pixels**. `1280x800` at scale `2` produces a `2560x1600`
+PNG. Capture reads the child compositor directly, so parent notifications and
+other host overlays do not enter the image. Hide a visible lab before shooting.
+
+- Without a file argument, the filename is `omalab-<name>-<WxH>@<scale>.png`
+  in the current directory. An explicit destination's parent directory must exist.
+- Size-only overrides keep the shell running.
+- **Scale overrides restart the lab shell twice**: once to render at the target
+  scale, and again when restoring it. Open panels and in-memory plugin state reset.
+- Original geometry is restored after capture or a catchable failure. The final
+  file is published atomically after successful restoration.
+
+For a stateful screenshot, start at the target scale first, then drive your
+plugin and capture without changing scale:
+
+```sh
+omalab up . -n preview-2x --size 1280x800 --scale 2
+# Open the desired state through your plugin's documented IPC or UI.
+omalab shot -n preview-2x artifacts/stateful.png
+omalab down -n preview-2x
+```
+
+The stamp records plugin id, commit/dirty state, theme, geometry and UTC date.
+Commit/date refresh on shell startup; screenshot overrides update its geometry.
+Use `--no-stamp` on `up` for unstamped product images. This does not freeze the
+bar clock, weather, network data or your plugin's live content.
+
+## Commands
+
+```text
 omalab up <plugin-dir> [-n NAME] [--theme NAME|mine] [--size WxH] [--scale N]
                        [--plus PLUGIN-ID ...] [--shared-bus] [--no-stamp]
-omalab show [-n NAME]         float the lab on your current workspace
-omalab hide [-n NAME]         put it back on the headless output
+omalab show [-n NAME]
+omalab hide [-n NAME]
 omalab shot [-n NAME] [FILE] [--scale N] [--size WxH]
-omalab ipc  [-n NAME] <target> <method> [args...]    omarchy-shell inside the lab
-omalab exec [-n NAME] <cmd...>                       run a command in the lab session
-omalab log  [-n NAME] [-f]    the lab shell's log (QML warnings included)
-omalab restart [-n NAME]      restart the lab shell; the plugin is a symlink, so edits are live
+omalab ipc [-n NAME] <target> <method> [args...]
+omalab exec [-n NAME] <cmd...>
+omalab log [-n NAME] [-f]
+omalab restart [-n NAME]
 omalab ls
 omalab down [-n NAME | --all]
 ```
 
-The lab looks like a fresh Omarchy install: stock bar layout, the default
-theme and wallpaper, your plugin added in its manifest's `defaultSection`.
-`--theme mine` uses your current theme and background instead. Several labs
-run side by side; `-n` names them.
-`show` is the only command that brings a lab onto your visible workspace;
-it does not switch workspaces or explicitly change focus. `hide` parks it
-again. Hide a lab before using `shot`.
+Defaults: name `default`, theme `tokyo-night`, size `1280x800`, scale `1`.
+`--theme mine` uses the host's current theme and wallpaper, not its plugin
+configuration. Names are 1–48 letters, digits, underscores or hyphens, starting
+with a letter or digit. Dimensions are 200–8192 logical pixels; scale must be
+positive and at most 4, with integral physical dimensions no larger than 16384.
 
-The default lab name is `default`; size defaults to `1280x800` logical pixels
-at scale `1`. `--plus` accepts installed plugin IDs or first-party Omarchy
-IDs. Machine-control services (idle, lock, battery power profiles, polkit and
-night light) are disabled: the real desktop owns those. Stock notifications
-are disabled so a notification plugin can own its private bus name; use
-`--plus omarchy.notifications` when you want the stock notification service.
-Names use 1–48 letters, digits, underscores or hyphens, starting with a letter
-or digit. Sizes range from 200 to 8192 logical pixels per dimension, at a
-positive scale up to 4; physical dimensions must be integral and at most
-16384 pixels. A short runtime path is required by Unix socket limits.
+Labs can run side by side. Use a unique name per task or job. Mutating CLI
+operations are serialized per runtime root. `down --all` really removes every
+lab belonging to that user—do not use it as a shared-runner cleanup shortcut.
 
-`shot` writes `omalab-<name>-<WxH>@<scale>.png` in the current directory unless
-you supply a file. Sizes are logical pixels: `--size 1280x800 --scale 2`
-produces 2560x1600 pixels. Geometry and scale are restored afterward, including
-on a catchable capture failure. **Changing scale restarts the lab shell twice**
-to render native-resolution text and restore its original scale; transient
-panels and in-memory plugin state reset. Size-only shots keep the shell running.
+## Isolation boundaries
 
-This is an isolated desktop environment, **not a sandbox for untrusted
-plugins**. Plugins and `exec` commands still run as your user. `--shared-bus`
-deliberately shares the host session bus; only use it when the plugin needs
-host session services. Audio remains private even with `--shared-bus`.
+| Resource | Lab behavior |
+|---|---|
+| HOME, configuration, cache, application state | New writable directories under `$XDG_RUNTIME_DIR/omalab/<name>/`. Removed by `down`. |
+| Plugin code | Symlink to the real checkout. Edits and writes to that checkout are real. |
+| Compositor and Wayland clients | Separate nested compositor, parked on a lab-owned host headless output. |
+| Session D-Bus | Private by default. `--shared-bus` deliberately connects to host session services and re-enables Qt portal integration. |
+| Audio | Private PipeWire server with no hardware discovery or session manager, even with `--shared-bus`. Empty device lists are intentional. |
+| Machine-control services | Idle/lock, battery power profiles, polkit and night light are disabled. |
+| Theme | Stock theme staged in the lab; `--theme mine` links to the host's theme/background, which omalab only reads. |
+| Filesystem, network, system bus, `/proc` | **Not isolated.** Plugins and `exec` run as your user. |
+| Parent environment and agent sockets | **Not scrubbed of arbitrary secrets.** Inherited tokens or an SSH-agent socket may remain reachable. |
 
-Every lab carries a small stamp in the bottom-right of the wallpaper: the
-plugin id, git commit and dirty marker, theme, size@scale, and UTC date, so a
-screenshot says where it came from. Commit/date refresh on `up` and `restart`;
-shot overrides update the displayed geometry. `--no-stamp` omits the service
-for clean product shots.
+A scratch HOME does not prevent a plugin from reading other files, using the
+network, or changing the real machine through an explicit command. `down`
+cleans up owned lab processes/state; it cannot undo arbitrary external side
+effects. **Never use a personal desktop runner for untrusted pull requests.**
 
-## What a lab does not have
+## Local automation, SSH and CI
 
-- **Your plugin credentials or configuration.** For omaquota,
-  `~/.config/omaquota/management-key` is intentionally absent in the scratch
-  HOME. The `setup` badge and snapshot error `no management key at ... - run
-  omaquota-setup` are expected plugin state, not a lab plumbing failure.
-  Configure the plugin deliberately through `omalab exec` when you need real
-  data. `--theme mine` shares only theme/background, not credentials.
-- **Your quota/usage history or a proxy server.** Plugin state starts empty;
-  omalab does not start CLIProxyAPI. Omaquota's default proxy address remains
-  `http://127.0.0.1:8317` unless you configure it in the lab.
-- **Your audio devices or desktop audio session.** Each lab has a real private
-  PipeWire server with no hardware discovery or session manager. Empty device
-  lists are intentional; lab audio controls do not target your live server.
-- **Your GTK desktop theme integration or private-bus portals.** Quickshell
-  uses its normal Qt/Wayland platform theme and Omarchy's own colours. Qt
-  desktop-portal integration is disabled on the private bus; `--shared-bus`
-  explicitly re-enables it against the host bus.
+| Where you run it | What is required |
+|---|---|
+| Terminal in Omarchy | Use the normal desktop user and inherited session environment. |
+| Local script or agent | Same session context; unique lab name, capture/log collection, scoped cleanup. No visible window is needed. |
+| SSH or a user service | Explicit access to the correct running desktop session and its current environment. Do not guess display numbers or use the newest compositor directory. |
+| Dedicated self-hosted CI runner | An active Omarchy session under the runner user, inherited graphical environment, and trusted jobs only. |
+| Stock hosted runner or standalone container | Not supported by the current backend. There is no bundled desktop bootstrap, Docker image, X11 backend or `omalab test` command. |
 
-## How
+See **[CI and automation](docs/CI.md)** for runner setup, environment handling,
+security restrictions, artifact collection and an opt-in GitHub Actions example.
+The runnable [smoke helper](examples/ci-smoke.sh) exercises startup, plugin
+registration and rendering; it does not replace your plugin's unit tests,
+behavioral assertions or visual review.
 
-The shell reads its configuration from `$HOME` and XDG directories, so the
-lab is an environment, not a copy: a scratch `HOME` and private runtime,
-config, state, cache and data directories; a generated `shell.json`; the theme
-staged by Omarchy's own `omarchy-theme-set-templates`; the plugin symlinked into
-`.config/omarchy/plugins/`. Hyprland runs as a Wayland client of your
-compositor (its window is parked on a headless output), the shell runs
-against that nested compositor, and a private D-Bus session lets a
-`service`-kind plugin own a bus name your real desktop already holds.
-`docs/HOW.md` has the details and the traps.
+Run the same smoke check locally from your plugin checkout:
 
-The lab is disposable: `down` removes its state; `down --all` removes all labs.
-Failed startup retains diagnostics under the lab directory until `down`.
-Use `log` for QML warnings; logs are never filtered. The Lua child disables
-only its standalone-startup watchdog warning, not general error reporting.
-Recreate existing labs after updating: `restart` restarts the shell, not the
-compositor or its configuration format.
+```sh
+artifacts=$(mktemp -d)
+"$HOME/.local/share/omalab/examples/ci-smoke.sh" "$PWD" "$artifacts"
+```
+
+Screenshots are not deterministic goldens out of the box. Pin the desktop,
+shell, plugin versions, fonts and theme; control time-dependent data and fixture
+state in your own tests. A hard-killed job or compositor failure can interrupt
+cleanup. Disposable runner machines are preferable to accumulating state on a
+shared desktop.
+
+## Agent skill
+
+Humans only need the CLI. The optional [omalab skill](skills/omalab/SKILL.md)
+gives coding agents the safe development loop: unique labs, no unapproved
+`show`, explicit credential/shared-bus decisions, real screenshot inspection,
+and cleanup of only the lab they created.
+
+Point your agent at that file or install it through your agent's skill loader.
+Omalab does not require an agent, change agent configuration, or install a skill
+as part of its normal installation.
+
+## Troubleshooting and implementation
+
+- Use `omalab log -n NAME` for the unfiltered shell log; `-f` follows it.
+- Failed startup keeps `compositor.log`, `shell.log`, `pipewire.log`, `bus.log`
+  and `theme.log` when those stages were reached. Collect them before `down`.
+- The short runtime aliases are necessary for Linux's Unix-socket path limit;
+  an unusually long `XDG_RUNTIME_DIR` can be rejected before startup.
+- Only `show` brings a lab onto a visible workspace. It does not explicitly
+  change focus or switch workspaces. No host physical-monitor config is rewritten.
+- Teardown removes the virtual output but can leave an inert disabled monitor
+  rule in the host's runtime configuration; it deliberately does not reload
+  your desktop to erase it.
+
+The [engineering reference](docs/HOW.md) describes the pre-map safety gate,
+process ownership, rendering and teardown contracts, and the measured
+validation coverage.
 
 ## License
 
-[Apache-2.0](LICENSE). Copyright 2026 Neil Patel.
+[Apache-2.0](LICENSE). Header artwork is original SVG artwork under the same license.

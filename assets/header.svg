@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="560" viewBox="0 0 1600 560" role="img" aria-labelledby="title description">
+  <title id="title">omalab — a throwaway Omarchy desktop for plugin development</title>
+  <desc id="description">An original dusk-road illustration in the default theme's indigo, violet and coral palette, with omalab's pixel wordmark and session-stamp typography. Decorative artwork, not a screenshot.</desc>
+  <defs>
+    <linearGradient id="sky" x2="1" y2="1"><stop stop-color="#12162d"/><stop offset=".55" stop-color="#29203f"/><stop offset="1" stop-color="#733f69"/></linearGradient>
+    <radialGradient id="horizon"><stop stop-color="#f7768e" stop-opacity=".6"/><stop offset="1" stop-color="#f7768e" stop-opacity="0"/></radialGradient>
+    <linearGradient id="terrain" x2=".4" y2="1"><stop stop-color="#63345d"/><stop offset=".48" stop-color="#272245"/><stop offset="1" stop-color="#11192f"/></linearGradient>
+    <linearGradient id="road" x1="0" y1="0" x2=".3" y2="1"><stop stop-color="#ffbc9a"/><stop offset=".48" stop-color="#ff987b"/><stop offset="1" stop-color="#f7768e"/></linearGradient>
+    <linearGradient id="shade"><stop stop-color="#111527" stop-opacity=".94"/><stop offset=".58" stop-color="#111527" stop-opacity=".72"/><stop offset="1" stop-color="#111527" stop-opacity="0"/></linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#a9b1d6" stroke-opacity=".035"/></pattern>
+    <clipPath id="frame"><rect width="1600" height="560" rx="18"/></clipPath>
+  </defs>
+  <g clip-path="url(#frame)">
+    <path fill="url(#sky)" d="M0 0H1600V560H0Z"/>
+    <ellipse cx="1320" cy="95" rx="620" ry="290" fill="url(#horizon)"/>
+    <path d="M600 153 810 184 955 132 1070 177 1170 108 1300 163 1400 118 1600 153V560H0Z" fill="#382441"/>
+    <path d="M765 239C981 179 1122 241 1250 196S1460 143 1600 178V560H0V367Z" fill="url(#terrain)"/>
+    <path d="M918 278C1137 240 1320 314 1600 234M834 347C1099 300 1330 370 1600 307M678 450C983 371 1243 475 1600 403M804 519C1088 428 1373 540 1600 492" fill="none" stroke="#b86b91" stroke-opacity=".15" stroke-width="2"/>
+    <path d="M1372 103C1231 165 1502 188 1323 252S1161 313 1304 374 1464 477 1324 604" fill="none" stroke="#f7768e" stroke-opacity=".1" stroke-width="94"/>
+    <path d="M1372 103C1231 165 1502 188 1323 252S1161 313 1304 374 1464 477 1324 604" fill="none" stroke="#392740" stroke-width="60"/>
+    <path d="M1372 103C1231 165 1502 188 1323 252S1161 313 1304 374 1464 477 1324 604" fill="none" stroke="url(#road)" stroke-width="48"/>
+    <path d="M1372 103C1231 165 1502 188 1323 252S1161 313 1304 374 1464 477 1324 604" fill="none" stroke="#ffe2bd" stroke-opacity=".65" stroke-width="2" stroke-dasharray="12 17"/>
+    <g fill="#15182e" stroke="#26203c" stroke-width="4">
+      <path d="M1571 0 1518 123 1564 278 1476 406 1502 560H1600V0Z"/>
+      <path d="M1467 0 1425 121 1490 68 1547 42 1503 0Z"/>
+      <path d="M1114 0 1160 112 1100 60 1047 45 1026 0Z"/>
+    </g>
+    <path d="M0 0H1220V560H0Z" fill="url(#shade)"/>
+    <path d="M0 0H1600V560H0Z" fill="url(#grid)"/>
+    <g fill="#a9b1d6" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="16" letter-spacing="3">
+      <text x="98" y="112">OMARCHY / PLUGIN DEVELOPMENT</text>
+      <text x="1502" y="72" text-anchor="end" fill="#e0afc3">PRIVATE SESSION</text>
+    </g>
+    <g transform="translate(96 165)" fill="#c0caf5" shape-rendering="crispEdges">
+      <rect x="14" y="0" width="70" height="14"/>
+      <rect x="112" y="0" width="28" height="14"/>
+      <rect x="182" y="0" width="28" height="14"/>
+      <rect x="252" y="0" width="42" height="14"/>
+      <rect x="336" y="0" width="28" height="14"/>
+      <rect x="476" y="0" width="42" height="14"/>
+      <rect x="560" y="0" width="84" height="14"/>
+      <rect x="0" y="14" width="28" height="14"/>
+      <rect x="70" y="14" width="28" height="14"/>
+      <rect x="112" y="14" width="42" height="14"/>
+      <rect x="168" y="14" width="42" height="14"/>
+      <rect x="238" y="14" width="28" height="14"/>
+      <rect x="280" y="14" width="28" height="14"/>
+      <rect x="336" y="14" width="28" height="14"/>
+      <rect x="462" y="14" width="28" height="14"/>
+      <rect x="504" y="14" width="28" height="14"/>
+      <rect x="560" y="14" width="28" height="14"/>
+      <rect x="630" y="14" width="28" height="14"/>
+      <rect x="0" y="28" width="28" height="14"/>
+      <rect x="70" y="28" width="28" height="14"/>
+      <rect x="112" y="28" width="98" height="14"/>
+      <rect x="224" y="28" width="28" height="14"/>
+      <rect x="294" y="28" width="28" height="14"/>
+      <rect x="336" y="28" width="28" height="14"/>
+      <rect x="448" y="28" width="28" height="14"/>
+      <rect x="518" y="28" width="28" height="14"/>
+      <rect x="560" y="28" width="28" height="14"/>
+      <rect x="630" y="28" width="28" height="14"/>
+      <rect x="0" y="42" width="28" height="14"/>
+      <rect x="70" y="42" width="28" height="14"/>
+      <rect x="112" y="42" width="28" height="14"/>
+      <rect x="154" y="42" width="14" height="14"/>
+      <rect x="182" y="42" width="28" height="14"/>
+      <rect x="224" y="42" width="98" height="14"/>
+      <rect x="336" y="42" width="28" height="14"/>
+      <rect x="448" y="42" width="98" height="14"/>
+      <rect x="560" y="42" width="84" height="14"/>
+      <rect x="0" y="56" width="28" height="14"/>
+      <rect x="70" y="56" width="28" height="14"/>
+      <rect x="112" y="56" width="28" height="14"/>
+      <rect x="182" y="56" width="28" height="14"/>
+      <rect x="224" y="56" width="28" height="14"/>
+      <rect x="294" y="56" width="28" height="14"/>
+      <rect x="336" y="56" width="28" height="14"/>
+      <rect x="448" y="56" width="28" height="14"/>
+      <rect x="518" y="56" width="28" height="14"/>
+      <rect x="560" y="56" width="28" height="14"/>
+      <rect x="630" y="56" width="28" height="14"/>
+      <rect x="0" y="70" width="28" height="14"/>
+      <rect x="70" y="70" width="28" height="14"/>
+      <rect x="112" y="70" width="28" height="14"/>
+      <rect x="182" y="70" width="28" height="14"/>
+      <rect x="224" y="70" width="28" height="14"/>
+      <rect x="294" y="70" width="28" height="14"/>
+      <rect x="336" y="70" width="28" height="14"/>
+      <rect x="448" y="70" width="28" height="14"/>
+      <rect x="518" y="70" width="28" height="14"/>
+      <rect x="560" y="70" width="28" height="14"/>
+      <rect x="630" y="70" width="28" height="14"/>
+      <rect x="14" y="84" width="70" height="14"/>
+      <rect x="112" y="84" width="28" height="14"/>
+      <rect x="182" y="84" width="28" height="14"/>
+      <rect x="224" y="84" width="28" height="14"/>
+      <rect x="294" y="84" width="28" height="14"/>
+      <rect x="336" y="84" width="98" height="14"/>
+      <rect x="448" y="84" width="28" height="14"/>
+      <rect x="518" y="84" width="28" height="14"/>
+      <rect x="560" y="84" width="84" height="14"/>
+    </g>
+    <text x="98" y="327" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="29" fill="#d5dafa">Real shell. Separate session.</text>
+    <text x="98" y="372" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="19" fill="#9ca6cd">Build your plugin. Inspect it. Throw the desktop away.</text>
+    <path d="M98 427H1002" stroke="#7aa2f7" stroke-opacity=".35"/>
+    <g font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="15">
+      <text x="98" y="465" fill="#7aa2f7">UP</text><text x="133" y="465" fill="#a9b1d6">offscreen</text>
+      <text x="336" y="465" fill="#7aa2f7">SHOT</text><text x="390" y="465" fill="#a9b1d6">native pixels</text>
+      <text x="641" y="465" fill="#7aa2f7">DOWN</text><text x="695" y="465" fill="#a9b1d6">clean slate</text>
+    </g>
+  </g>
+</svg>

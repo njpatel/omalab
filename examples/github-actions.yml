@@ -1,0 +1,48 @@
+# Copy examples/ci-smoke.sh from omalab to ci/omalab-smoke.sh in the plugin
+# repository and preserve its executable bit before using this workflow.
+name: omalab smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omalab-desktop-session
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    # The custom label must identify a trusted runner launched inside a dedicated,
+    # active Omarchy desktop session. This job cannot run on a hosted runner.
+    runs-on: [self-hosted, linux, omalab]
+    timeout-minutes: 15
+
+    steps:
+      - name: Prepare artifact directory
+        shell: bash
+        run: mkdir -p -- "$RUNNER_TEMP/omalab-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+      # actions/checkout v7.0.1 (requires a current Node 24-capable runner)
+      - name: Check out plugin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Run startup and rendering smoke
+        shell: bash
+        env:
+          # Leave this repository variable unset to resolve omalab from PATH.
+          OMALAB_BIN: ${{ vars.OMALAB_BIN }}
+        run: ./ci/omalab-smoke.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/omalab-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+      # actions/upload-artifact v7.0.1 (GitHub.com)
+      - name: Upload omalab artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: omalab-smoke
+          path: ${{ runner.temp }}/omalab-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 7
