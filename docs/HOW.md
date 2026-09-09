@@ -21,11 +21,17 @@ implementation source contracts and runtime proofs. Corrections are explicit.
   implementation captures the child's own environment through `exec-once`.
   Under a private runtime directory its display can be `wayland-1` again;
   the host display is passed as an absolute socket path.
-- Output inside is `WAYLAND-1`. Size and scale are set with
-  `hyprctl -i <sig> eval 'hl.monitor({output="WAYLAND-1", mode="1280x800@60", scale=1})'`
-  (`keyword monitor` is rejected by the Lua config parser; `hl.monitor` needs
-  `output` and `mode`, not `name`/`resolution`). Scale 2 is what makes a
-  HiDPI screenshot.
+- Output inside is `WAYLAND-1`. **Correction:** the generated `.conf` uses the
+  legacy config manager, so `eval` is rejected. Resize the child with
+  `hyprctl -i <child sig> keyword monitor 'WAYLAND-1,2560x1600@60,0x0,2'`.
+  This is a child-only keyword, never a host keyword. The host Lua manager
+  uses `hl.monitor({output=..., mode=..., scale=...})`; the two APIs are not
+  interchangeable. 1280x800 logical pixels at scale 2 needs a 2560x1600 mode.
+  For actual screenshot relayout, a bare legacy keyword was insufficient:
+  monitor JSON changed but existing layer sizes could stay stale. `shot`
+  updates the first monitor line in the generated **child-only** config and
+  calls `hyprctl reload` through the lab environment. This announces the new
+  layer geometry; restoring the shot restores that config line as well.
 - Config needs `misc { disable_hyprland_logo = true; disable_splash_rendering = true }`
   and `xwayland { enabled = false }`; nothing else. Keep it Hyprland-conf, not
   Lua, so it works on any Omarchy without their bootstrap.
@@ -155,6 +161,14 @@ exception. All use the captured host signature, never an implicit instance:
   Host layers created after this transition can still overlay the lab; a
   later headless capture must reassert the addressed window's fullscreen
   transition once those layers exist. No host layer rule may be changed.
+  `shot` performs an addressed `internal=0, client=0` then `internal=2,
+  client=2` transition before capturing; both operations remain on the
+  headless lab output. This hides host layers that appeared after startup.
+- Screenshot overrides use the same output-specific `hl.monitor` operation
+  on the lab-owned output only, temporarily moving it farther left to avoid
+  overlap as it grows. Its original geometry/position and child scale are
+  restored after capture or a catchable failure. No physical-output rule,
+  workspace selection, focus, or host layer rule is changed.
 - Teardown disables only the retained lab workspace-rule handle and the
   exact lab output rule after removing the output. It never reloads host
   configuration or changes physical-output rules.
@@ -262,3 +276,47 @@ was used.
   runtime aliases and all OMALAB outputs. `/proc` again showed zero processes
   carrying those lab environments; `ls` printed only its heading. The real
   config/theme/background fingerprints still matched. **Step 1 complete.**
+
+## Step 2 proof: native screenshots
+
+`shot` captures the lab-owned host headless output using `grim -s 1 -o
+OMALAB-<name>`. It verifies the exact child PID/address is parked there, resets
+fullscreen only for that address to exclude late-created host layers, and
+uses a completed child frame as a rendering barrier. Overrides resize only
+the lab output and generated child config. Original position, mode, scale,
+and config are restored; the final PNG replaces its destination atomically.
+
+**Rendering correction and approved tradeoff:** simply changing a running
+Qt shell's output scale produced a larger PNG with upscaled cached glyphs.
+The defect was visible both in the host capture and a direct child capture;
+reloading the child compositor config did not rerasterize those glyphs.
+Starting the shell at scale 2 produced native detail. Neil explicitly approved
+restarting only the lab shell on each scale transition (capture and restore).
+This resets transient plugin state; size-only overrides do not restart it.
+
+Verified commands/results:
+
+- `shot -n quota`: default filename `omalab-quota-1280x800@1.png`, exactly
+  1280x800. Opened and inspected: Tokyo Night wallpaper, stock lab bar and
+  omaquota's `setup` indicator.
+- `shot -n quota <proof>/final-2.png --scale 2`: exactly 2560x1600, same
+  logical desktop. Opened and inspected at native resolution. Equal-logical
+  crops of the workspace digits `2` and `3` were enlarged with nearest-neighbor
+  display for comparison: @1 has coarse one-pixel stair steps; @2 has finer
+  contours and distinct antialias samples, not doubled or bilinearly enlarged
+  @1 pixels. Pixel comparisons also rejected both upscaling equivalents.
+- `shot -n quota <proof>/size-only.png --size 1600x900`: 1600x900 with correctly
+  relaid-out bar; opened and inspected. Lab shell PID unchanged. Original
+  1280x800@1 output and byte-identical child config restored.
+- A real capture failure was induced with a non-writable destination directory
+  after requesting 1800x1000@2. `mktemp` failed with permission denied and the
+  command returned nonzero without a final PNG. The EXIT path restored
+  1280x800@1, the byte-identical child config, and a responsive shell (`ping`
+  returned `ok`). A second `hires` lab remained responsive throughout.
+- Exact snapshots of physical monitor geometry, host active workspace/focus,
+  and existing host client geometry were identical across the measured
+  size-only-success plus scale-override-failure sequence.
+
+ShellCheck v0.11.0 passed after the final screenshot changes. No `show` or
+host focus/workspace dispatcher was used. **Step 2 complete; step 3 requires
+Neil's separate in-tab approval.**

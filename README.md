@@ -47,6 +47,13 @@ night light) are disabled: the real desktop owns those. Stock notifications
 are disabled so a notification plugin can own its private bus name; use
 `--plus omarchy.notifications` when you want the stock notification service.
 
+`shot` writes `omalab-<name>-<WxH>@<scale>.png` in the current directory unless
+you supply a file. Sizes are logical pixels: `--size 1280x800 --scale 2`
+produces 2560x1600 pixels. Geometry and scale are restored afterward, including
+on a catchable capture failure. **Changing scale restarts the lab shell twice**
+to render native-resolution text and restore its original scale; transient
+panels and in-memory plugin state reset. Size-only shots keep the shell running.
+
 This is an isolated desktop environment, **not a sandbox for untrusted
 plugins**. Plugins and `exec` commands still run as your user. `--shared-bus`
 deliberately shares the host session bus; only use it when the plugin needs

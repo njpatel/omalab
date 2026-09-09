@@ -13,10 +13,13 @@ Usage: omalab up <plugin-dir> [-n NAME] [--theme NAME|mine] [--size WxH]
        omalab ipc [-n NAME] <target> <method> [args...]
        omalab exec [-n NAME] <cmd...>
        omalab restart [-n NAME]
+       omalab shot [-n NAME] [FILE] [--scale N] [--size WxH]
 
 Labs default to the name "default". Size is logical pixels (default 1280x800),
 scale defaults to 1, and the default theme is tokyo-night. Extra plugins are
 resolved from your installed plugins or Omarchy's first-party plugins.
+Scale-changing shots restart the lab shell for native text and reset transient
+panels; geometry and scale are restored afterward. Size-only shots do not restart.
 Only the lab's HOME and XDG directories are disposable; this is not a sandbox
 for untrusted plugins. --shared-bus deliberately shares desktop bus services.
 USAGE
@@ -231,6 +234,16 @@ start_shell() {
   launch shell quickshell -n -p "$OMARCHY_PATH/shell"
   shell_ready
 }
+restart_shell() {
+  local role pid start
+  PLUGIN_ID=$(jq -er .plugin "$LAB/meta.json")
+  stop_role shell
+  while read -r role pid start; do
+    [[ $role == shell ]] || printf '%s %s %s\n' "$role" "$pid" "$start"
+  done < "$LAB/pids" > "$LAB/pids.next"
+  mv -- "$LAB/pids.next" "$LAB/pids"
+  start_shell
+}
 
 list_labs() {
   printf 'NAME\tPLUGIN\tSIZE@SCALE\tTHEME\tAGE\tPROCESSES\n'
@@ -248,6 +261,121 @@ list_labs() {
     fi
     jq -r --arg state "$alive" --argjson now "$now" '[.name,.plugin,(.size+"@"+(.scale|tostring)),.theme,((($now-.created)|tostring)+"s"),$state] | @tsv' "$dir/meta.json"
   done
+}
+
+park_fullscreen() {
+  host_eval "hl.dispatch(hl.dsp.window.fullscreen_state({internal=0, client=0, window='address:$ADDRESS'})); hl.dispatch(hl.dsp.window.fullscreen_state({internal=2, client=2, window='address:$ADDRESS'}))"
+}
+
+shot_geometry() {
+  local x=$1 y=$2 attempt reply first
+  host_eval "hl.monitor({output='$OUTPUT', mode='${PIXEL_W}x${PIXEL_H}@60', position='${x}x${y}', scale=1})"
+  park_fullscreen
+  # A legacy keyword changes reported mode but can leave existing layer sizes
+  # stale. Reload the generated child config to announce the new output geometry.
+  {
+    IFS= read -r first
+    [[ $first == 'monitor = '* ]] || fail 'generated child monitor line was replaced'
+    printf 'monitor = %s,%sx%s@60,0x0,%s\n' "$CHILD_OUTPUT" "$PIXEL_W" "$PIXEL_H" "$SCALE"
+    cat
+  } < "$LAB/hyprland.conf" > "$LAB/hyprland.conf.next"
+  mv -- "$LAB/hyprland.conf.next" "$LAB/hyprland.conf"
+  reply=$(run_lab hyprctl reload)
+  [[ $reply == ok ]] || fail "child refused screenshot geometry: $reply"
+  for ((attempt=0; attempt<100; attempt++)); do
+    if run_lab hyprctl -j monitors | jq -e --arg output "$CHILD_OUTPUT" --argjson w "$PIXEL_W" --argjson h "$PIXEL_H" --argjson scale "$SCALE" \
+      '.[] | select(.name==$output and .width==$w and .height==$h and .scale==$scale)' >/dev/null; then break; fi
+    sleep 0.1
+  done
+  (( attempt < 100 )) || fail 'child output did not reach screenshot geometry'
+  # Qt's native glyph cache is not rerasterized on a live scale change.
+  [[ $SHOT_RESTART == 0 ]] || restart_shell
+  for ((attempt=0; attempt<100; attempt++)); do
+    if run_lab hyprctl -j layers | jq -e --argjson w "$PIXEL_W" --argjson h "$PIXEL_H" --argjson scale "$SCALE" \
+      '.. | objects | select(.namespace?=="omarchy-background" and .w==($w/$scale) and .h==($h/$scale))' >/dev/null; then
+      sleep 0.2
+      # A completed child frame precedes capture of its parent-composited surface.
+      run_lab timeout 10 grim -o "$CHILD_OUTPUT" /dev/null
+      park_fullscreen
+      return
+    fi
+    sleep 0.1
+  done
+  fail 'shell did not relayout for screenshot geometry'
+}
+
+restore_shot() {
+  local status=$?
+  trap - EXIT INT TERM
+  if [[ $SHOT_CHANGED == 1 ]]; then
+    SIZE=$SHOT_SIZE SCALE=$SHOT_SCALE
+    geometry
+    if ! (shot_geometry "$SHOT_X" "$SHOT_Y"); then
+      printf 'omalab: could not restore lab geometry; inspect %s\n' "$LAB" >&2
+      status=1
+    fi
+  fi
+  [[ -z $SHOT_TEMP ]] || rm -f -- "$SHOT_TEMP"
+  exit "$status"
+}
+
+shot() {
+  load_lab
+  SHOT_SIZE=$SIZE SHOT_SCALE=$SCALE SHOT_TEMP='' SHOT_CHANGED=0 SHOT_RESTART=0
+  local file='' monitor pid child x y
+  while (( $# )); do
+    case $1 in
+      --size|--scale)
+        [[ $# -ge 2 ]] || fail "missing value for $1"
+        case $1 in --size) SIZE=$2 ;; --scale) SCALE=$2 ;; esac
+        shift 2 ;;
+      --) shift; [[ $# == 1 && -z $file ]] || fail 'shot takes one file'; file=$1; shift ;;
+      -*) fail "unknown shot option: $1" ;;
+      *) [[ -z $file ]] || fail 'shot takes one file'; file=$1; shift ;;
+    esac
+  done
+  geometry
+  if jq -en --argjson before "$SHOT_SCALE" --argjson after "$SCALE" '$before != $after' >/dev/null; then
+    SHOT_RESTART=1
+    printf 'omalab: scale override restarts the lab shell for native text; transient panels reset\n' >&2
+  fi
+  file=${file:-omalab-$NAME-$SIZE@$SCALE.png}
+  file=$(realpath -m -- "$file")
+  [[ -d ${file%/*} && ! -d $file ]] || fail 'screenshot destination directory does not exist or file is a directory'
+  ADDRESS=$(jq -er .address "$LAB/meta.json")
+  [[ $ADDRESS =~ ^0x[0-9a-fA-F]+$ ]] || fail 'invalid lab window address'
+  read -r pid < "$LAB/compositor.pid"
+  monitor=$(host -j monitors | jq -ce --arg name "$OUTPUT" '.[] | select(.name==$name)')
+  host -j clients | jq -e --arg address "$ADDRESS" --argjson pid "$pid" --argjson monitor "$(jq .id <<< "$monitor")" \
+    '.[] | select(.address==$address and .pid==$pid and .class=="aquamarine" and .monitor==$monitor)' >/dev/null || fail 'lab window is not parked on its output'
+  child=$(run_lab hyprctl -j monitors | jq -ce 'select(length==1) | .[0]') || fail 'shot requires one child output'
+  CHILD_OUTPUT=$(jq -er .name <<< "$child")
+  [[ $CHILD_OUTPUT =~ ^[A-Za-z0-9_-]+$ ]] || fail 'unsupported child output name'
+  SHOT_X=$(jq -r .x <<< "$monitor") SHOT_Y=$(jq -r .y <<< "$monitor")
+  x=$SHOT_X y=$SHOT_Y
+  trap restore_shot EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [[ $SIZE != "$SHOT_SIZE" || $SCALE != "$SHOT_SCALE" ]]; then
+    x=$(host -j monitors | jq --argjson width "$PIXEL_W" '([.[].x] + [0] | min) - $width - 1024')
+    SHOT_CHANGED=1
+    shot_geometry "$x" "$y"
+  else
+    park_fullscreen
+    run_lab timeout 10 grim -o "$CHILD_OUTPUT" /dev/null
+  fi
+  SHOT_TEMP=$(mktemp -- "$file.XXXXXX")
+  env XDG_RUNTIME_DIR="$HOST_RUNTIME" WAYLAND_DISPLAY="$HOST_DISPLAY" timeout 15 grim -s 1 -o "$OUTPUT" "$SHOT_TEMP"
+  if [[ $SHOT_CHANGED == 1 ]]; then
+    SIZE=$SHOT_SIZE SCALE=$SHOT_SCALE
+    geometry
+    shot_geometry "$SHOT_X" "$SHOT_Y"
+    SHOT_CHANGED=0
+  fi
+  mv -f -- "$SHOT_TEMP" "$file"
+  SHOT_TEMP=
+  trap - EXIT INT TERM
+  printf '%s\n' "$file"
 }
 
 create_output() {
@@ -431,13 +559,14 @@ case $COMMAND in
     exit 0 ;;
 esac
 case $COMMAND in
-  up|down|restart) exec 9>"$ROOT/.lock"; flock 9 ;;
+  up|down|restart|shot) exec 9>"$ROOT/.lock"; flock 9 ;;
 esac
 if [[ $COMMAND == up ]]; then up "$@"; exit; fi
 NAME=default
 NAMED=0
 if [[ ${1:-} == -n ]]; then [[ $# -ge 2 ]] || fail 'missing lab name'; NAME=$2; NAMED=1; shift 2; fi
 case $COMMAND in
+  shot) shot "$@" ;;
   ls) [[ $# == 0 && $NAMED == 0 ]] || fail 'ls takes no arguments'; list_labs ;;
   down)
     if [[ ${1:-} == --all ]]; then
@@ -460,13 +589,8 @@ case $COMMAND in
   exec) [[ $# -gt 0 ]] || fail 'exec requires a command'; load_lab; run_lab "$@" ;;
   restart)
     [[ $# == 0 ]] || fail 'restart takes no arguments'
-    load_lab; PLUGIN_ID=$(jq -er .plugin "$LAB/meta.json")
-    stop_role shell
-    # Retain only currently owned process records; old shell PIDs are no longer state.
-    local_pids=$LAB/pids.next
-    while read -r role pid start; do [[ $role == shell ]] || printf '%s %s %s\n' "$role" "$pid" "$start"; done < "$LAB/pids" > "$local_pids"
-    mv -- "$local_pids" "$LAB/pids"
-    start_shell
+    load_lab
+    restart_shell
     printf 'Restarted %s\n' "$NAME" ;;
   *) fail "unknown command: $COMMAND (see --help)" ;;
 esac
