@@ -1,4 +1,4 @@
-![omalab — a disposable Omarchy desktop for plugin development](assets/header.png)
+![omalab — a disposable Omarchy desktop for plugin development](assets/header.svg)
 
 **Develop shell plugins against a real Omarchy desktop without restarting your own.**
 

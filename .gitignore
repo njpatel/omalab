@@ -1,5 +1,4 @@
 CLAUDE.md
 *.png
 !stamp/preview.png
-!assets/header.png
 /omalab-ci-artifacts/
