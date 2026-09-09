@@ -14,28 +14,26 @@ implementation source contracts and runtime proofs. Corrections are explicit.
   signature inherited, the child tries to lock the parent's `wayland-1` and
   dies silently ("unable to lock lockfile ... maybe another compositor is
   running"). With it unset, it takes the next free name (`wayland-2`).
-- It does not need `start-hyprland`; the warning is harmless. It does need to
-  be detached (`setsid`/`nohup`) or it dies with the shell that launched it.
+- The child is launched asynchronously by the host's PID-bound executor, not
+  `start-hyprland`. Its Lua config sets `misc.disable_watchdog_warning=true`,
+  the supported standalone-startup warning control on this build. General
+  `debug.suppress_errors` remains false; configuration errors are not hidden.
 - Discover signature and display from a command the child `exec`s, not the
   newest global instance directory (which races concurrent labs). The runtime
-  implementation captures the child's own environment through `exec-once`.
+  implementation captures the child's environment from a `hyprland.start`
+  Lua event callback via `hl.exec_cmd`.
   Under a private runtime directory its display can be `wayland-1` again;
   the host display is passed as an absolute socket path.
-- Output inside is `WAYLAND-1`. **Correction:** the generated `.conf` uses the
-  legacy config manager, so `eval` is rejected. Resize the child with
-  `hyprctl -i <child sig> keyword monitor 'WAYLAND-1,2560x1600@60,0x0,2'`.
-  This is a child-only keyword, never a host keyword. The host Lua manager
-  uses `hl.monitor({output=..., mode=..., scale=...})`; the two APIs are not
-  interchangeable. 1280x800 logical pixels at scale 2 needs a 2560x1600 mode.
-  For actual screenshot relayout, a bare legacy keyword was insufficient:
-  monitor JSON changed but existing layer sizes could stay stale. `shot`
-  updates the first monitor line in the generated **child-only** config and
-  calls `hyprctl reload` through the lab environment. This announces the new
-  layer geometry; restoring the shot restores that config line as well.
-- The generated child config disables the logo, splash, XWayland and
-  animations. Its legacy parser works in the verified Hyprland 0.56.2 build;
-  it is not a promise of compatibility with every Omarchy release. The child
-  warns that `.conf` support is scheduled for removal in Hyprland 0.57.
+- Output inside is `WAYLAND-1`. **Corrected release:** generate
+  `hyprland.lua` with `hl.monitor({output=..., mode=..., position=..., scale=...})`
+  and `hl.config(...)`; no legacy `.conf` file or keyword path remains.
+  1280x800 logical pixels at scale 2 needs a 2560x1600 mode. For screenshots,
+  update the first monitor declaration and reload only the child, then restore
+  that declaration afterward. This preserves the proven relayout behavior.
+- The child disables logo, splash, XWayland, animations and the watchdog-startup
+  warning. The earlier claims that `.conf` was preferable and warning banners
+  would harmlessly expire were wrong for product screenshots; Neil's external
+  verification caught them. Lua removes the deprecation warning at its source.
 - **Idle requirement proved for the implemented backend:** the hand probe
   hung after roughly a minute while offscreen. With the lab mapped on its
   headless output, IPC and a new `grim` Wayland client both succeeded after
@@ -76,9 +74,10 @@ implementation source contracts and runtime proofs. Corrections are explicit.
   Names in `/usr/share/omarchy/default/hypr/bindings/*.lua` are the reference.
   `hyprctl -j clients` `at`/`size` are logical (post-scale) coordinates; so is
   `grim -g`.
-- Screenshots: `grim -o <headless-output-name>` on the host captures the whole
-  parked window without ever showing it. Direct child `grim` is also proven
-  and is used for rendering barriers and the idle acceptance probe.
+- Product screenshots now capture directly from the child's Wayland socket.
+  Capturing the host's headless output can include host notification overlays,
+  even over a fullscreen lab window. Direct child `grim` excludes those layers
+  without changing host notifications, focus, or layer rules.
 
 ## The shell side
 
@@ -106,13 +105,15 @@ implementation source contracts and runtime proofs. Corrections are explicit.
   desktop; do not call it. Default theme is `tokyo-night`; its first
   background is `0-winding-road.jpg`. `--theme mine` = symlink the host's
   `current/theme` and `current/background`.
-- The shell warns that `org.freedesktop.Notifications` and the polkit agent
-  are already registered, and the portal app id is taken. On the shared bus
-  notification ownership warnings do not mean the lab owns the service.
-  A private bus allows a service plugin to own a separate notification name,
-  but polkit and hardware-control services must still be disabled. Portal and
-  accessibility warnings can remain on a private bus; do not claim those are
-  removed. `--shared-bus` deliberately shares session services.
+- A private bus permits separate notification ownership, but polkit and
+  hardware-control services must still be disabled. Remove the inherited
+  `QT_QPA_PLATFORMTHEME=gtk3` selector to avoid inappropriate GTK portal and
+  accessibility initialization. Set `QT_NO_XDG_DESKTOP_PORTAL=1` for private
+  buses and `0` for explicit shared buses. These prevent unsupported integration
+  requests; they do not filter Qt logging. Detailed classification follows below.
+- Stock audio widgets connect to a private, no-hardware PipeWire server started
+  before Quickshell. Use the lab runtime socket explicitly, not the live host
+  server; terminate this owned helper after the shell and before the bus/child.
 - `QS_DISABLE_FILE_WATCHER=1` as the launcher sets it; omalab restarts
   deliberately. The shell's log is on stdout/stderr; capture it to a file per
   lab so `omalab log` can grep for `TypeError`, `binding loop`, `qml:`.
@@ -296,12 +297,11 @@ was used.
 
 ## Step 2 proof: native screenshots
 
-`shot` captures the lab-owned host headless output using `grim -s 1 -o
-OMALAB-<name>`. It verifies the exact child PID/address is parked there, resets
-fullscreen only for that address to exclude late-created host layers, and
-uses a completed child frame as a rendering barrier. Overrides resize only
-the lab output and generated child config. Original position, mode, scale,
-and config are restored; the final PNG replaces its destination atomically.
+The original step-2 implementation captured the host headless output. The
+corrected release captures the child output directly to exclude parent
+notification overlays. It still verifies the exact lab PID/address is parked,
+temporarily resizes only lab geometry, and restores mode, position, scale and
+child config. The destination PNG is replaced atomically after restoration.
 
 **Rendering correction and approved tradeoff:** simply changing a running
 Qt shell's output scale produced a larger PNG with upscaled cached glyphs.
@@ -419,3 +419,113 @@ Verification:
   5120x2880@2 geometry at `[0,0]`.
 
 The release commit is tagged locally as `v0.1.0`; pushing is Neil's step.
+
+## Release correction after external verification
+
+Neil verified lifecycle/capture/scale/teardown externally, then rejected the
+child's visible `.conf` and standalone-startup warnings and the noisy shell
+log. The earlier assumption that those banners merely expired was wrong.
+
+### Warning-free child and product capture
+
+The child now loads `hyprland.lua`; the startup callback uses
+`hl.on("hyprland.start", ...)` and `hl.exec_cmd` to report its environment.
+The generated config and all resize/restore/launch callers use Lua. No
+legacy config path or compatibility shim remains.
+
+Verified on the installed Hyprland:
+
+```text
+hyprctl -j status                         configProvider: lua, backend: wayland
+hyprctl -j getoption misc:disable_watchdog_warning   bool: true, set: true
+hyprctl -j getoption debug:suppress_errors           bool: false, set: false
+hyprctl configerrors                      empty
+```
+
+These commands were run through `omalab exec` against the child, not the host.
+`misc.disable_watchdog_warning` is the narrow supported control for the
+intentional standalone nested launch; general error reporting stays enabled.
+Normal 1280x800 and native 2560x1600 shots were opened and inspected with no
+Hyprland warning banners. Size-only 1600x900 capture and restoration also passed.
+
+Inspection also exposed parent desktop notifications over host-side captures.
+The final `grim` now connects directly to the child's socket: parent layers
+cannot enter the PNG. This is real child rendering, not cropping, masking,
+post-processing, or changing the host's notification settings. Existing scale
+and atomic-output restoration behavior is retained.
+
+### Complete baseline diagnostic split
+
+The external verification lab had already been removed. A fresh omaquota lab
+was used to collect the exact messages for classification; its complete log
+is retained at `$XDG_RUNTIME_DIR/omalab/.proof/correction-before.log`.
+The sample has **4 lines matching `error|TypeError|binding loop`, all plumbing**,
+plus **3 accessibility warnings, also plumbing**. Logs append across shell
+restarts, so counts in an accumulated log can be higher.
+
+| Baseline line(s) | Diagnostic | Classification and fix |
+|---|---|---|
+| 6, 7 | `qt.qpa.theme.gnome`: `org.freedesktop.portal.Settings` / `UnknownMethod` | Plumbing: inherited `QT_QPA_PLATFORMTHEME=gtk3` loads GTK desktop integration on a private bus. Unset that selector; Omarchy's Qt Quick theme remains intact. |
+| 9 | `AT-SPI: Could not obtain desktop path or name` | Plumbing: GTK initialized accessibility against an incomplete private registry. Removing the inherited GTK platform theme prevents this initialization. |
+| 11 | `qt.qpa.services`: `Connection already associated with an application ID` | Plumbing: Qt's initial portal registration can race its service-registration watcher during fresh private portal activation. Unsetting GTK alone did not reliably fix a fresh launch. Set `QT_NO_XDG_DESKTOP_PORTAL=1` for private buses, where host portal integration is unsupported; use `0` for explicit `--shared-bus`. |
+| 13 | `atk-bridge: GetRegisteredEvents returned message with unknown signature` | Plumbing: same inappropriate GTK accessibility initialization; fixed by platform-theme isolation. |
+| 15 | `atk-bridge: get_device_events_reply: unknown signature` | Plumbing: same GTK/accessibility path; fixed by platform-theme isolation. |
+| 16 | `quickshell.service.pipewire.loop`: `Failed to connect pipewire context. Errno: 112` | Plumbing: stock audio clients had no server in the private runtime. Start a real private PipeWire server before Quickshell, with no hardware devices or session manager. |
+
+There were **0 omaquota-owned matching shell-log lines**, and no TypeError or
+binding-loop messages in this preserved sample. Missing credentials are not
+an excuse to dismiss such messages if they occur. Separately, the actual
+omaquota snapshot contained the expected plugin-owned state:
+
+```text
+ok: false
+error: no management key at <scratch HOME>/.config/omaquota/management-key - run omaquota-setup
+stats: {}
+accounts: []
+```
+
+This is an expected `setup` state, not a shell-log TypeError. The fetcher writes
+it to `~/.local/state/omarchy/omaquota/snapshot.json` and exits before contacting
+the proxy. The real management key and usage history are intentionally not
+copied. README's **What a lab does not have** section explains that boundary.
+
+### Source fixes, not logging suppression
+
+- Omarchy's `default/hypr/envs.lua` exports the GTK3 platform-theme selector.
+  Qt's GTK3 theme initializes GTK and its portal-settings client. Removing that
+  inherited selector fixes the Settings/accessibility messages without an
+  accessibility blacklist or log-category filter.
+- Qt's `QDesktopUnixServices` constructor checks
+  `QT_NO_XDG_DESKTOP_PORTAL` before creating portal queries/registration/watchers.
+  This deliberately disables unsupported private-bus integration, not logging.
+  Explicit shared-bus startup was also verified with clean logs and the portal
+  selector at `0`.
+- `omalab-pipewire.conf` is a uniquely named lab-owned config, following
+  Omarchy's private filter-host configuration convention. It loads only native
+  protocol, client-node, metadata and access modules. No ALSA, device factories,
+  WirePlumber, Pulse server or hardware session manager is started.
+  `PIPEWIRE_RUNTIME_DIR` and `PIPEWIRE_REMOTE` select only the private socket.
+  Using the host socket to silence the error was rejected: it would connect
+  the lab's audio controls to real devices. `pw-dump` confirmed the private
+  core PID equals the recorded lab PipeWire PID and there are zero Device/Node
+  objects. `down` and failed startup stop the owned audio process too.
+
+After fresh corrected startup plus scale-change/restoration shell restarts,
+the complete unfiltered omaquota shell log contains **0 matching errors,
+0 warnings, 0 TypeErrors and 0 binding loops**. It is retained as
+`$XDG_RUNTIME_DIR/omalab/.proof/correction-after.log`. Neither Qt logging rules
+nor the shell's stderr capture were suppressed. The missing-key snapshot
+still reports its genuine expected plugin state.
+
+Final correction checks exercised seven shell starts (including scale
+transitions and failed-capture restoration) with zero matching errors or
+warnings in the raw corrected log. A permission-denied capture restored the
+byte-identical Lua config and a responsive shell. Normal, native-scale and
+stamped direct-child PNGs were inspected without startup banners or parent
+overlays. ShellCheck v0.11.0 and Bash syntax checks passed.
+
+Only the five correction test labs were stopped. Their compositor, shell,
+bus and private PipeWire processes, output names and state directories were
+gone afterward; real shell config/theme/background fingerprints still matched
+the pre-correction values. The fixed commit replaces the local `v0.1.0` tag
+at Neil's request; nothing is pushed.

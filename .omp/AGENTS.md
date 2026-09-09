@@ -15,7 +15,7 @@ rediscover anything in HOW.md; do add to it when you learn something.
   `shell.json` unless `--no-stamp`.
 - `docs/HOW.md` — the knowledge. `README.md` — the product.
 - State per lab: `$XDG_RUNTIME_DIR/omalab/<name>/` holding `home/` (scratch
-  HOME), `hyprland.conf`, `env` (KEY=VALUE for the child: sig, display, bus),
+  HOME), `hyprland.lua`, `env` (KEY=VALUE for the child: sig, display, bus),
   `pids`, `shell.log`. `omalab ls` reads these dirs. `down` removes the dir.
 
 ## Rules

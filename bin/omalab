@@ -61,6 +61,7 @@ load_lab() {
   OUTPUT=$(jq -er .output "$LAB/meta.json")
   SIZE=$(jq -er .size "$LAB/meta.json")
   SCALE=$(jq -er .scale "$LAB/meta.json")
+  SHARED=$(jq -r '.sharedBus | if . then 1 else 0 end' "$LAB/meta.json")
   geometry
 }
 
@@ -68,7 +69,10 @@ lab_env() {
   ENV_ARGS=(env -u DISPLAY -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u HYPRLAND_INSTANCE_SIGNATURE
     -u DBUS_SESSION_BUS_ADDRESS -u DBUS_STARTER_ADDRESS -u DBUS_STARTER_BUS_TYPE
     -u HL_INITIAL_WORKSPACE_TOKEN -u AT_SPI_BUS_ADDRESS -u OMALAB_STAMP
+    -u QT_QPA_PLATFORMTHEME
     "XDG_RUNTIME_DIR=$RUNTIME" "OMALAB_HOST_RUNTIME=$HOST_RUNTIME"
+    "PIPEWIRE_RUNTIME_DIR=$RUNTIME" "PIPEWIRE_REMOTE=pipewire-0"
+    "QT_NO_XDG_DESKTOP_PORTAL=$((1 - SHARED))"
     "HOME=$LAB/home" "XDG_CONFIG_HOME=$LAB/home/.config"
     "XDG_STATE_HOME=$LAB/home/.local/state" "XDG_CACHE_HOME=$LAB/home/.cache"
     "XDG_DATA_HOME=$LAB/home/.local/share" "TMPDIR=$LAB/tmp" "OMALAB_DIR=$LAB"
@@ -244,6 +248,34 @@ update_stamp() {
     '{plugin:.plugin,commit:$commit,dirty:$dirty,theme:.theme,size:$size,scale:$scale,date:$date}' "$LAB/meta.json" > "$LAB/stamp.next"
   mv -- "$LAB/stamp.next" "$LAB/stamp.json"
 }
+start_audio() {
+  # A private registry satisfies stock PipeWire clients without exposing the
+  # user's audio controls. No ALSA, device factories, or session manager.
+  cat > "$LAB/omalab-pipewire.conf" <<'CONFIG'
+context.properties = {
+  core.daemon = true
+  core.name = pipewire-0
+}
+context.spa-libs = { support.* = support/libspa-support }
+context.modules = [
+  { name = libpipewire-module-protocol-native }
+  { name = libpipewire-module-client-node }
+  { name = libpipewire-module-metadata }
+  { name = libpipewire-module-access }
+]
+context.objects = [
+  { factory = metadata args = { metadata.name = default } }
+]
+CONFIG
+  launch pipewire pipewire -c "$LAB/omalab-pipewire.conf"
+  local attempt
+  for ((attempt=0; attempt<100; attempt++)); do
+    [[ ! -S $RUNTIME/pipewire-0 ]] || return 0
+    sleep 0.05
+  done
+  fail 'private PipeWire server did not become ready; see pipewire.log'
+}
+
 start_shell() {
   if jq -e .stampEnabled "$LAB/meta.json" >/dev/null; then update_stamp; fi
   launch shell quickshell -n -p "$OMARCHY_PATH/shell"
@@ -321,15 +353,14 @@ shot_geometry() {
   local x=$1 y=$2 attempt reply first
   host_eval "hl.monitor({output='$OUTPUT', mode='${PIXEL_W}x${PIXEL_H}@60', position='${x}x${y}', scale=1})"
   park_fullscreen
-  # A legacy keyword changes reported mode but can leave existing layer sizes
-  # stale. Reload the generated child config to announce the new output geometry.
+  # Reload the generated child config to announce the new output geometry.
   {
     IFS= read -r first
-    [[ $first == 'monitor = '* ]] || fail 'generated child monitor line was replaced'
-    printf 'monitor = %s,%sx%s@60,0x0,%s\n' "$CHILD_OUTPUT" "$PIXEL_W" "$PIXEL_H" "$SCALE"
+    [[ $first == 'hl.monitor('* ]] || fail 'generated child monitor line was replaced'
+    printf 'hl.monitor({output="%s", mode="%sx%s@60", position="0x0", scale=%s})\n' "$CHILD_OUTPUT" "$PIXEL_W" "$PIXEL_H" "$SCALE"
     cat
-  } < "$LAB/hyprland.conf" > "$LAB/hyprland.conf.next"
-  mv -- "$LAB/hyprland.conf.next" "$LAB/hyprland.conf"
+  } < "$LAB/hyprland.lua" > "$LAB/hyprland.lua.next"
+  mv -- "$LAB/hyprland.lua.next" "$LAB/hyprland.lua"
   reply=$(run_lab hyprctl reload)
   [[ $reply == ok ]] || fail "child refused screenshot geometry: $reply"
   for ((attempt=0; attempt<100; attempt++)); do
@@ -347,8 +378,6 @@ shot_geometry() {
         run_lab omarchy-shell omalab.stamp geometry "$SIZE" "$SCALE" >/dev/null
       fi
       sleep 0.2
-      # A completed child frame precedes capture of its parent-composited surface.
-      run_lab timeout 10 grim -o "$CHILD_OUTPUT" /dev/null
       park_fullscreen
       return
     fi
@@ -415,10 +444,11 @@ shot() {
     shot_geometry "$x" "$y"
   else
     park_fullscreen
-    run_lab timeout 10 grim -o "$CHILD_OUTPUT" /dev/null
   fi
   SHOT_TEMP=$(mktemp -- "$file.XXXXXX")
-  env XDG_RUNTIME_DIR="$HOST_RUNTIME" WAYLAND_DISPLAY="$HOST_DISPLAY" timeout 15 grim -s 1 -o "$OUTPUT" "$SHOT_TEMP"
+  # Capture the child itself: parent overlays (including notifications) must
+  # never enter a product shot. grim waits for the child's completed frame.
+  run_lab timeout 15 grim -o "$CHILD_OUTPUT" "$SHOT_TEMP"
   if [[ $SHOT_CHANGED == 1 ]]; then
     SIZE=$SHOT_SIZE SCALE=$SHOT_SCALE
     geometry
@@ -453,6 +483,7 @@ create_output() {
 
 destroy_lab() {
   stop_role shell
+  stop_role pipewire
   stop_role bus
   stop_role compositor
   if [[ -f $LAB/output.created ]]; then
@@ -474,6 +505,7 @@ startup_failed() {
   if (( status != 0 )); then
     printf 'omalab: startup failed; stopping lab processes (logs retained in %s)\n' "$LAB" >&2
     stop_role shell
+    stop_role pipewire
     stop_role bus
     stop_role compositor
     if [[ -f $LAB/output.created ]]; then
@@ -546,21 +578,24 @@ up() {
     for ((attempt=0; attempt<100; attempt++)); do [[ ! -S $LAB/bus ]] || break; sleep 0.05; done
     [[ -S $LAB/bus ]] || fail 'private bus did not become ready'
   fi
+  start_audio
   local capture
   printf -v capture '%q _capture-env %q' "$SELF" "$NAME"
-  cat > "$LAB/hyprland.conf" <<CONFIG
-monitor = WAYLAND-1,${PIXEL_W}x${PIXEL_H}@60,0x0,$SCALE
-misc {
-  disable_hyprland_logo = true
-  disable_splash_rendering = true
-}
-xwayland {
-  enabled = false
-}
-animations {
-  enabled = false
-}
-exec-once = $capture
+  capture=$(jq -Rn --arg command "$capture" '$command')
+  cat > "$LAB/hyprland.lua" <<CONFIG
+hl.monitor({output="WAYLAND-1", mode="${PIXEL_W}x${PIXEL_H}@60", position="0x0", scale=$SCALE})
+hl.config({
+  misc = {
+    disable_hyprland_logo = true,
+    disable_splash_rendering = true,
+    disable_watchdog_warning = true,
+  },
+  xwayland = { enabled = false },
+  animations = { enabled = false },
+})
+hl.on("hyprland.start", function()
+  hl.exec_cmd($capture)
+end)
 CONFIG
   create_output
   lab_env
@@ -604,7 +639,7 @@ case $COMMAND in
       sleep 0.05
     done
     [[ -f $LAB/map.allowed ]] || fail 'host did not acknowledge map rules'
-    exec Hyprland --config "$LAB/hyprland.conf" </dev/null >>"$LAB/compositor.log" 2>&1 ;;
+    exec Hyprland --config "$LAB/hyprland.lua" </dev/null >>"$LAB/compositor.log" 2>&1 ;;
   _capture-env)
     NAME=${1:?}; valid_name "$NAME"; LAB=$ROOT/$NAME
     [[ ${OMALAB_DIR:-} == "$LAB" && -f $LAB/meta.json ]] || fail 'not a lab compositor environment'
