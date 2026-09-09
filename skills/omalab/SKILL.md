@@ -1,6 +1,6 @@
 ---
 name: omalab
-description: Use when developing an Omarchy shell plugin in an isolated lab or validating plugin screenshots at controlled sizes and scales. Triggers include Omarchy plugin development, Quickshell plugin debugging, omalab, headless plugin preview, and screenshot validation.
+description: Use when developing or testing an Omarchy shell plugin in an isolated omalab session, capturing plugin screenshots or videos, or exercising child-scoped pointer and keyboard input. Triggers include Omarchy plugin development, Quickshell plugin debugging, omalab, offscreen preview, and visual validation.
 ---
 
 # Omalab
@@ -57,12 +57,26 @@ omalab down -n <unique-name>
 - Copy any required logs, screenshots or other artifacts out of the disposable
   lab before `down`.
 
+## Video and input
+
+Use the [tested automation recipes](automation.md) for optional `wf-recorder`
+video capture, `wtype` keyboard input and child-only Hyprland pointer actions.
+Always route them through `omalab exec -n <owned-lab>`; never target the host
+or use kernel-global input injection as a substitute. The recipes cover the
+pointer-frame requirement for clicks on the verified Hyprland version.
+
+Start at the final scale before driving stateful UI. Finish and inspect a video
+before tearing down the lab. Verify actual UI changes, not just successful
+input-tool exit codes. Do not publish captures or install missing automation
+tools without the user's authorization.
+
 ## Visibility and host safety
 
 A normal lab remains parked on a negative-coordinate headless output.
 
-- Never run `omalab show` without the user's explicit permission in the current
-  conversation. Screenshot validation does not require showing the lab.
+- Never run `omalab show` without explicit permission for this task's visible
+  inspection. An earlier preview approval is not blanket permission for future
+  labs. Screenshot and video validation do not require showing the lab.
 - Never issue host `hyprctl keyword`, focus, workspace-switch, special-workspace
   or direct window-dispatch commands. Do not modify physical monitor rules,
   host layer rules or desktop configuration. Use omalab's supported commands.

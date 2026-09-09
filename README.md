@@ -239,9 +239,25 @@ gives coding agents the safe development loop: unique labs, no unapproved
 `show`, explicit credential/shared-bus decisions, real screenshot inspection,
 and cleanup of only the lab they created.
 
-Point your agent at that file or install it through your agent's skill loader.
-Omalab does not require an agent, change agent configuration, or install a skill
-as part of its normal installation.
+The skill also includes [video and input recipes](skills/omalab/automation.md):
+record the child with `wf-recorder`, type with `wtype`, and move/click its pointer
+through child-scoped Hyprland dispatch. These are optional tool integrations,
+not new `omalab record` or `omalab click` commands. No global input injector is
+used; the skill is guidance, not a security sandbox.
+
+For agents that read the shared user skill directory, after the CLI installation
+above:
+
+```sh
+mkdir -p "$HOME/.agents/skills"
+ln -s "$HOME/.local/share/omalab/skills/omalab" "$HOME/.agents/skills/omalab"
+```
+
+Use your actual checkout path if it differs. Claude Code and Codex users can
+link that same directory under their respective `~/.claude/skills/` and
+`~/.codex/skills/` roots. Start a new agent session so it rescans skills.
+The CLI installation itself does not alter agent configuration or require a
+skill, and existing skill directories should not be overwritten.
 
 ## Troubleshooting and implementation
 

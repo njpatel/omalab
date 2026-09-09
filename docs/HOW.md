@@ -36,8 +36,9 @@ instance directory is unsafe when labs start concurrently.
 Host mutations are intentionally narrow and are always sent to the captured
 host instance, never to an implicit Hyprland instance:
 
-- Read monitor and client state to calculate placement and verify the exact lab
-  window.
+- Read monitor, client, active-workspace and cursor state to calculate placement
+  and verify the exact lab window and input isolation. `hyprctl -j cursorpos`
+  is a read-only observation; input dispatch must target only the child.
 - Declare one named workspace rule and one monitor rule for
   `OMALAB-<name>`.
 - Create or remove that exact named headless output.
@@ -214,6 +215,25 @@ Omarchy's `ScreenMoveRemap` so a resized background-layer surface remaps above
 the wallpaper while remaining on the child background layer. No host layer or
 window rule is involved.
 
+## Video and child input
+
+Optional recording and input tools run through `omalab exec`, preserving the
+full child runtime/display environment. `wf-recorder` can capture the child's
+output directly; a bounded timeout sends SIGINT to finalize the video before
+teardown. Video-only capture does not enable microphone or host-audio recording.
+
+The verified Hyprland cursor dispatcher updates that compositor's own pointer
+manager. `wtype` uses its Wayland virtual-keyboard protocol. Mouse-button
+`send_key_state` dispatches have an important protocol detail in 0.56.2: they
+send button events without a pointer frame. Flushing each press/release with
+child pointer motion made a Qt test control receive the intended click; bare
+button commands alone were insufficient. The [automation recipes](../skills/omalab/automation.md)
+include the tested sequence and coordinate scaling rules.
+
+Never substitute host dispatches or kernel-global injection tools. Environment
+variables do not sandbox or redirect host-wide injection through tools such as
+`ydotool` or `/dev/uinput`. Prefer plugin IPC for directly establishing state.
+
 ## Teardown and failure state
 
 Normal teardown stops the shell, private PipeWire server, private bus and child
@@ -278,6 +298,12 @@ compatibility:
 - Final teardown left no recorded lab processes, named lab outputs, short
   runtime aliases or lab directories, and measured host shell/theme/background
   content remained unchanged.
+
+- A disposable Qt input probe received virtual-keyboard text, pointer hover and
+  a framed mouse click. The click incremented its counter once while host
+  cursor samples immediately before/after the measured sequence matched.
+  A finalized 1280x800 H.264 video at approximately 30 fps showed the actual
+  typing and click state changes, with no audio track.
 
 For user-facing commands and supported options, use `bin/omalab --help` and the
 project README. This file explains why the implementation is conservative.
