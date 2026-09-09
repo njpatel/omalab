@@ -11,13 +11,30 @@ Item {
   property var shell: null
   property var stamp: JSON.parse(Quickshell.env("OMALAB_STAMP") || "{}")
   signal remapRequested()
-  readonly property string mark: [
-    " ▄████▄  ▄██▄██▄  ▄████▄  ██      ▄████▄  █████▄ ",
-    " ██  ██  ██ █ ██  ██  ██  ██      ██  ██  ██  ██ ",
-    " ██  ██  ██ █ ██  ██████  ██      ██████  █████▄ ",
-    " ██  ██  ██   ██  ██  ██  ██      ██  ██  ██  ██ ",
-    " ▀████▀  ██   ██  ██  ██  ██████  ██  ██  █████▀ "
-  ].join("\n")
+  // Bitmap rows describe the mark, not font glyphs. Merge each horizontal run
+  // so cells never overlap or depend on fallback-font bearings and line height.
+  readonly property var markRows: [
+    ".#####. ##...## ..###.. ##..... ..###.. ######.",
+    "##...## ###.### .##.##. ##..... .##.##. ##...##",
+    "##...## ####### ##...## ##..... ##...## ##...##",
+    "##...## ##.#.## ####### ##..... ####### ######.",
+    "##...## ##...## ##...## ##..... ##...## ##...##",
+    "##...## ##...## ##...## ##..... ##...## ##...##",
+    ".#####. ##...## ##...## ####### ##...## ######."
+  ]
+  readonly property var markRuns: {
+    const runs = []
+    for (let row = 0; row < markRows.length; row++) {
+      const pixels = markRows[row]
+      for (let column = 0; column < pixels.length;) {
+        if (pixels[column] !== "#") { column++; continue }
+        const start = column
+        while (column < pixels.length && pixels[column] === "#") column++
+        runs.push({row: row, column: start, span: column - start})
+      }
+    }
+    return runs
+  }
 
   IpcHandler {
     target: "omalab.stamp"
@@ -64,16 +81,27 @@ Item {
         spacing: 7
         opacity: 0.42
 
-        Text {
+        Item {
+          id: wordmark
           width: parent.width
-          text: root.mark
-          color: Color.accent
-          font.family: "monospace"
-          font.pixelSize: 9
-          lineHeightMode: Text.FixedHeight
-          lineHeight: 9
-          horizontalAlignment: Text.AlignRight
-          renderType: Text.NativeRendering
+          readonly property real pixelRatio: Screen.devicePixelRatio || 1
+          readonly property real cellSize: Math.floor(Math.min(6, width / root.markRows[0].length) * pixelRatio) / pixelRatio
+          readonly property real leftInset: Math.round((width - root.markRows[0].length * cellSize) * pixelRatio) / pixelRatio
+          height: root.markRows.length * cellSize
+
+          Repeater {
+            model: root.markRuns
+
+            Rectangle {
+              required property var modelData
+              x: wordmark.leftInset + modelData.column * wordmark.cellSize
+              y: modelData.row * wordmark.cellSize
+              width: modelData.span * wordmark.cellSize
+              height: wordmark.cellSize
+              color: Color.accent
+              antialiasing: false
+            }
+          }
         }
 
         Rectangle {
@@ -90,7 +118,7 @@ Item {
           font.pixelSize: 11
           elide: Text.ElideMiddle
           horizontalAlignment: Text.AlignRight
-          renderType: Text.NativeRendering
+          renderType: Text.QtRendering
         }
 
         Text {
@@ -101,7 +129,7 @@ Item {
           font.pixelSize: 11
           elide: Text.ElideRight
           horizontalAlignment: Text.AlignRight
-          renderType: Text.NativeRendering
+          renderType: Text.QtRendering
         }
 
         Text {
@@ -111,7 +139,7 @@ Item {
           font.family: "monospace"
           font.pixelSize: 9
           horizontalAlignment: Text.AlignRight
-          renderType: Text.NativeRendering
+          renderType: Text.QtRendering
         }
       }
     }

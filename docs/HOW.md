@@ -529,3 +529,27 @@ bus and private PipeWire processes, output names and state directories were
 gone afterward; real shell config/theme/background fingerprints still matched
 the pre-correction values. The fixed commit replaces the local `v0.1.0` tag
 at Neil's request; nothing is pushed.
+
+## Stamp rendering correction
+
+Neil's screenshot exposed uneven bright bands in the font-based wordmark.
+On this machine `fc-match monospace` resolves to JetBrains Mono Nerd Font.
+FreeType metrics at the stamp's old 9-pixel font size give `█` ink bounds
+`(0,1,6,13)` and a 5.40625-pixel advance: 12 pixels of ink height against the
+forced 9-pixel line spacing, plus ink extending beyond horizontal advances.
+Overlapping translucent block glyphs therefore did not form a uniform grid.
+
+The wordmark is now a seven-row bitmap rendered as non-overlapping horizontal
+rectangle runs. Cell sizes and the right offset snap to device pixels using
+`Screen.devicePixelRatio`; no block-element font, font fallback, forced line
+height, canvas texture or offscreen compositing layer is needed. The metadata
+uses Qt's scalable text renderer. Theme accent, 42% opacity, click-through
+behavior, geometry IPC and corner placement are unchanged.
+
+A separate headless `stamp-render-proof` lab with omaherdr produced 1280x800@1,
+2560x1600@2 and 1600x1000@1.25 screenshots. Full stamp details were opened and
+inspected at each scale; an unfiltered nearest-neighbor enlargement of the
+native 2x PNG confirmed sharp rectangle edges without overlapping bands.
+The complete lab log had no errors, TypeErrors, binding loops or warnings
+across five shell starts. The user's running lab was not manually restarted,
+shown, hidden or stopped. Only the dedicated proof lab was removed afterward.
