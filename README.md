@@ -1,4 +1,5 @@
-<img src="assets/header.png" alt="omalab — the real lab stamp over the default wallpaper" width="702">
+<!-- Pin the CDN revision to the commit containing assets/header.png. -->
+<img src="https://cdn.jsdelivr.net/gh/njpatel/omalab@183fe7d29b2d1eb3787fd356d9c5d127af812d80/assets/header.png" alt="omalab — the real lab stamp over the default wallpaper" width="702">
 
 **Develop shell plugins against a real Omarchy desktop without restarting your own.**
 
