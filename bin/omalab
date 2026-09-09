@@ -7,15 +7,15 @@ usage() {
   cat <<'USAGE'
 Usage: omalab up <plugin-dir> [-n NAME] [--theme NAME|mine] [--size WxH]
                  [--scale N] [--plus PLUGIN-ID ...] [--shared-bus] [--no-stamp]
-       omalab down [-n NAME | --all]
-       omalab ls
-       omalab log [-n NAME] [-f]
-       omalab ipc [-n NAME] <target> <method> [args...]
-       omalab exec [-n NAME] <cmd...>
-       omalab restart [-n NAME]
-       omalab shot [-n NAME] [FILE] [--scale N] [--size WxH]
        omalab show [-n NAME]
        omalab hide [-n NAME]
+       omalab shot [-n NAME] [FILE] [--scale N] [--size WxH]
+       omalab ipc [-n NAME] <target> <method> [args...]
+       omalab exec [-n NAME] <cmd...>
+       omalab log [-n NAME] [-f]
+       omalab restart [-n NAME]
+       omalab ls
+       omalab down [-n NAME | --all]
 
 Labs default to the name "default". Size is logical pixels (default 1280x800),
 scale defaults to 1, and the default theme is tokyo-night. Extra plugins are
@@ -587,7 +587,7 @@ CONFIG
   start_shell
   run_lab hyprctl -j layers | jq -e '.. | objects | select(.namespace? == "omarchy-bar")' >/dev/null || fail 'lab bar has no layer'
   trap - EXIT INT TERM
-  printf 'Lab %s is up: %s %s@%s (%s).\nInspect: omalab ipc -n %s shell listPlugins; omalab log -n %s\n' "$NAME" "$PLUGIN_ID" "$SIZE" "$SCALE" "$THEME" "$NAME" "$NAME"
+  printf 'Lab %s is up: %s %s@%s (%s).\nShow: omalab show -n %s\nCapture: omalab shot -n %s\nLog: omalab log -n %s\n' "$NAME" "$PLUGIN_ID" "$SIZE" "$SCALE" "$THEME" "$NAME" "$NAME" "$NAME"
 }
 
 COMMAND=$1; shift

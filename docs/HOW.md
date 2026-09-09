@@ -32,9 +32,10 @@ implementation source contracts and runtime proofs. Corrections are explicit.
   updates the first monitor line in the generated **child-only** config and
   calls `hyprctl reload` through the lab environment. This announces the new
   layer geometry; restoring the shot restores that config line as well.
-- Config needs `misc { disable_hyprland_logo = true; disable_splash_rendering = true }`
-  and `xwayland { enabled = false }`; nothing else. Keep it Hyprland-conf, not
-  Lua, so it works on any Omarchy without their bootstrap.
+- The generated child config disables the logo, splash, XWayland and
+  animations. Its legacy parser works in the verified Hyprland 0.56.2 build;
+  it is not a promise of compatibility with every Omarchy release. The child
+  warns that `.conf` support is scheduled for removal in Hyprland 0.57.
 - **Idle requirement proved for the implemented backend:** the hand probe
   hung after roughly a minute while offscreen. With the lab mapped on its
   headless output, IPC and a new `grim` Wayland client both succeeded after
@@ -76,8 +77,8 @@ implementation source contracts and runtime proofs. Corrections are explicit.
   `hyprctl -j clients` `at`/`size` are logical (post-scale) coordinates; so is
   `grim -g`.
 - Screenshots: `grim -o <headless-output-name>` on the host captures the whole
-  parked window without ever showing it. Inside-the-child `grim` is the
-  alternative once the idle problem is solved.
+  parked window without ever showing it. Direct child `grim` is also proven
+  and is used for rendering barriers and the idle acceptance probe.
 
 ## The shell side
 
@@ -86,8 +87,8 @@ implementation source contracts and runtime proofs. Corrections are explicit.
   `Quickshell.env("HOME")` for `~/.config/omarchy/shell.json` and
   `~/.config/omarchy/plugins/`, and `$XDG_STATE_HOME/omarchy/current/{theme,background}`
   for colours and wallpaper. So the lab is: `HOME`, `XDG_CONFIG_HOME`,
-  `XDG_STATE_HOME`, `XDG_CACHE_HOME` pointed at a scratch dir, plus
-  `WAYLAND_DISPLAY` and `HYPRLAND_INSTANCE_SIGNATURE` of the child. Leave
+  `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and a short private
+  `XDG_RUNTIME_DIR`, plus the child's display and instance signature. Leave
   `OMARCHY_PATH` alone: the real shell code, `Commons`, `Ui`, first-party
   plugins.
 - With that env and a `shell.json` copied from
@@ -393,3 +394,28 @@ Verification:
   commit was used.
 - Final restart, stamped/unstamped captures, ShellCheck and Bash syntax checks
   passed. All stamp development remained headless. **Step 4 complete.**
+
+## Step 5 proof: v0.1.0 release
+
+- README and `bin/omalab --help` describe all implemented commands/options,
+  naming and geometry limits, the explicit show boundary, hidden-only capture,
+  scale-transition shell restarts, private-bus/runtime limitations and stamp
+  semantics. Compatibility is stated as verified Hyprland 0.56.2 / Quickshell
+  0.3.1, not a claim about future parser/API versions.
+- Added the declared Apache-2.0 distribution license from Apache's official
+  license text. No additional runtime package or test dependency is bundled.
+- Final `up ~/src/omaquota` created the default named lab with its stamp and
+  printed working show/capture/log instructions. `ipc shell ping` returned
+  `ok`; `shot <proof>/release-default.png` produced a 1280x800 PNG that was
+  opened and inspected, including the stamp. No additional visible show was
+  needed for release verification.
+- Final ShellCheck v0.11.0 and `bash -n bin/omalab` passed. `bin/omalab --help`
+  printed the complete CLI and exited successfully.
+- Final `down --all` removed quota, stamped, clean, stamp-self and default.
+  `/proc` contained zero processes carrying their lab environments; no
+  OMALAB output, short runtime alias or named lab directory remained. `ls`
+  printed only its heading. The real shell config/theme/background fingerprints
+  remained unchanged, and the physical output returned to its original
+  5120x2880@2 geometry at `[0,0]`.
+
+The release commit is tagged locally as `v0.1.0`; pushing is Neil's step.
