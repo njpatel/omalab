@@ -1,4 +1,4 @@
-![omalab — a disposable Omarchy desktop for plugin development](assets/header.svg)
+<img src="assets/header.png" alt="omalab — the real lab stamp over the default wallpaper" width="702">
 
 **Develop shell plugins against a real Omarchy desktop without restarting your own.**
 
@@ -261,4 +261,4 @@ validation coverage.
 
 ## License
 
-[Apache-2.0](LICENSE). Header artwork and its [editable SVG source](assets/header.svg) use the same license.
+Code: [Apache-2.0](LICENSE). Header background: Omarchy's Tokyo Night wallpaper, captured with the omalab stamp at native 2× scale.
