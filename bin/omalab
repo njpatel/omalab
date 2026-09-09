@@ -14,6 +14,8 @@ Usage: omalab up <plugin-dir> [-n NAME] [--theme NAME|mine] [--size WxH]
        omalab exec [-n NAME] <cmd...>
        omalab restart [-n NAME]
        omalab shot [-n NAME] [FILE] [--scale N] [--size WxH]
+       omalab show [-n NAME]
+       omalab hide [-n NAME]
 
 Labs default to the name "default". Size is logical pixels (default 1280x800),
 scale defaults to 1, and the default theme is tokyo-night. Extra plugins are
@@ -265,6 +267,32 @@ list_labs() {
 
 park_fullscreen() {
   host_eval "hl.dispatch(hl.dsp.window.fullscreen_state({internal=0, client=0, window='address:$ADDRESS'})); hl.dispatch(hl.dsp.window.fullscreen_state({internal=2, client=2, window='address:$ADDRESS'}))"
+}
+
+lab_window() {
+  ADDRESS=$(jq -er .address "$LAB/meta.json")
+  [[ $ADDRESS =~ ^0x[0-9a-fA-F]+$ ]] || fail 'invalid lab window address'
+  local pid
+  read -r pid < "$LAB/compositor.pid"
+  host -j clients | jq -e --arg address "$ADDRESS" --argjson pid "$pid" \
+    '.[] | select(.address==$address and .pid==$pid and .class=="aquamarine")' >/dev/null || fail 'lab window is no longer available'
+}
+
+show_lab() {
+  load_lab
+  lab_window
+  # Resolve the destination in the same host request that moves this one window.
+  host_eval "local window='address:$ADDRESS'; local workspace=hl.get_active_workspace(); assert(workspace, 'no active workspace'); hl.dispatch(hl.dsp.window.fullscreen_state({internal=0, client=0, window=window})); hl.dispatch(hl.dsp.window.float({action='enable', window=window})); hl.dispatch(hl.dsp.window.move({workspace=workspace.config_name, follow=false, window=window})); hl.dispatch(hl.dsp.window.resize({x=${SIZE%x*}, y=${SIZE#*x}, relative=false, window=window})); hl.dispatch(hl.dsp.window.center({window=window}))"
+  printf 'Showing %s; hide with: omalab hide -n %s\n' "$NAME" "$NAME"
+}
+
+hide_lab() {
+  load_lab
+  lab_window
+  host -j monitors | jq -e --arg name "$OUTPUT" '.[] | select(.name==$name)' >/dev/null || fail 'lab output is no longer available'
+  host_eval "local window='address:$ADDRESS'; hl.dispatch(hl.dsp.window.fullscreen_state({internal=0, client=0, window=window})); hl.dispatch(hl.dsp.window.move({workspace='name:omalab-$NAME', follow=false, window=window}))"
+  park_fullscreen
+  printf 'Hidden %s\n' "$NAME"
 }
 
 shot_geometry() {
@@ -559,13 +587,16 @@ case $COMMAND in
     exit 0 ;;
 esac
 case $COMMAND in
-  up|down|restart|shot) exec 9>"$ROOT/.lock"; flock 9 ;;
+  up|down|restart|shot|show|hide) exec 9>"$ROOT/.lock"; flock 9 ;;
 esac
 if [[ $COMMAND == up ]]; then up "$@"; exit; fi
 NAME=default
 NAMED=0
 if [[ ${1:-} == -n ]]; then [[ $# -ge 2 ]] || fail 'missing lab name'; NAME=$2; NAMED=1; shift 2; fi
 case $COMMAND in
+  show|hide)
+    [[ $# == 0 ]] || fail "$COMMAND takes only -n NAME"
+    if [[ $COMMAND == show ]]; then show_lab; else hide_lab; fi ;;
   shot) shot "$@" ;;
   ls) [[ $# == 0 && $NAMED == 0 ]] || fail 'ls takes no arguments'; list_labs ;;
   down)

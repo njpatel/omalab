@@ -172,6 +172,22 @@ exception. All use the captured host signature, never an implicit instance:
 - Teardown disables only the retained lab workspace-rule handle and the
   exact lab output rule after removing the output. It never reloads host
   configuration or changes physical-output rules.
+- Neil approved the first `show` in this tab before step 3. `show` uses a
+  single host `eval` request whose every dispatcher explicitly targets the
+  verified lab address: unset fullscreen, set floating, move to the current
+  workspace with `follow=false`, set exact logical `x`/`y` size with
+  `relative=false`, then center that window. The current workspace is read
+  inside the same request. No focus or workspace-switch dispatcher is used.
+  `hide` unsets fullscreen on that same address, silently moves it back to
+  `name:omalab-<name>`, and restores fullscreen on its lab-owned output only.
+  Omarchy's `default/hypr/bindings/tiling.lua` provides the silent-move and
+  float/resize patterns. **Correction:** this installed version's Lua resize
+  API is `{x=W, y=H, relative=false, window=...}`, not `{size={W,H}, exact=true}`.
+  Its `center` dispatcher also accepts an explicit `window` selector.
+  Floating uses `action="enable"`: the installed parser treats unrecognized
+  `"set"` as **toggle**, unlike fullscreen-state's `action="set"`. The first
+  attempted show exposed that distinction and was immediately hidden; its
+  active-workspace snapshot remained unchanged.
 
 The initial far-right parking proposal was wrong: on this host, whose physical
 output uses `position="auto"`, two headless outputs shifted its global x from
@@ -320,3 +336,19 @@ Verified commands/results:
 ShellCheck v0.11.0 passed after the final screenshot changes. No `show` or
 host focus/workspace dispatcher was used. **Step 2 complete; step 3 requires
 Neil's separate in-tab approval.**
+
+## Step 3 proof: approved show / hide
+
+Neil approved proceeding in this tab before the first visible test.
+`show -n quota` placed one floating 1280x800 logical window on workspace 3,
+centered at `[640,333]` within the physical monitor's available area. It was
+left visible for eight seconds; a crop of the actual visible lab window was
+opened and inspected. Repeating `show` kept it floating rather than toggling
+it back into the layout. `hide -n quota` returned the same address to
+`name:omalab-quota`, fullscreen only on its headless output.
+
+The complete `hyprctl -j activeworkspace` JSON was exactly identical before
+and after. Snapshots of all original clients' address, PID, class, workspace,
+position and size, plus physical monitor geometry/focus, were also identical.
+`shot -n quota` succeeded after hiding. No workspace-switch or focus
+dispatcher was used. **Step 3 complete.**
