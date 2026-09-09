@@ -1,8 +1,8 @@
 # How omalab isolates, and what was learned proving it
 
-Findings from a hand probe on 2026-09-09 (Hyprland 0.56.2, Omarchy shell from
-/usr/share/omarchy, Intel iGPU, one 5120x2880@2 output). Everything below was
-observed, not assumed.
+Initial findings from a hand probe on 2026-09-09 (Hyprland 0.56.2, Omarchy
+shell from /usr/share/omarchy, Intel iGPU, one 5120x2880@2 output), followed by
+implementation source contracts and runtime proofs. Corrections are explicit.
 
 ## Nested Hyprland
 
@@ -16,10 +16,11 @@ observed, not assumed.
   running"). With it unset, it takes the next free name (`wayland-2`).
 - It does not need `start-hyprland`; the warning is harmless. It does need to
   be detached (`setsid`/`nohup`) or it dies with the shell that launched it.
-- Its instance signature is the newest dir under `$XDG_RUNTIME_DIR/hypr/`
-  after launch. Its socket name is in the env of anything it `exec`s
-  (`WAYLAND_DISPLAY=wayland-2`). Read both from `hyprctl -i <sig>` / a probe
-  exec, never guess.
+- Discover signature and display from a command the child `exec`s, not the
+  newest global instance directory (which races concurrent labs). The runtime
+  implementation captures the child's own environment through `exec-once`.
+  Under a private runtime directory its display can be `wayland-1` again;
+  the host display is passed as an absolute socket path.
 - Output inside is `WAYLAND-1`. Size and scale are set with
   `hyprctl -i <sig> eval 'hl.monitor({output="WAYLAND-1", mode="1280x800@60", scale=1})'`
   (`keyword monitor` is rejected by the Lua config parser; `hl.monitor` needs
@@ -28,22 +29,37 @@ observed, not assumed.
 - Config needs `misc { disable_hyprland_logo = true; disable_splash_rendering = true }`
   and `xwayland { enabled = false }`; nothing else. Keep it Hyprland-conf, not
   Lua, so it works on any Omarchy without their bootstrap.
-- **Open problem:** after ~1 min idle the nested instance stopped accepting new
-  Wayland clients (`grim` and `wayland-info` on its socket hung; `hyprctl -i`
-  still answered). Not root-caused. Suspects: no `--watchdog-fd`, or the parent
-  stopped sending frame callbacks to an unmapped/offscreen window so the child
-  never ticks. Test with the window on a headless output first; if it recurs,
-  try `debug:disable_scale_checks` / `misc:vfr = false` in the child config.
+- **Idle requirement proved for the implemented backend:** the hand probe
+  hung after roughly a minute while offscreen. With the lab mapped on its
+  headless output, IPC and a new `grim` Wayland client both succeeded after
+  605 seconds untouched (step 1 proof below). No watchdog, VFR workaround or
+  periodic keepalive was needed. This does not root-cause the old probe hang.
 
 ## The host side
 
-- Park the child window on a headless output so it never appears on the user's
-  screen: `hyprctl output create headless <name>` then
-  `hyprctl eval 'hl.monitor({output="<name>", mode="WxH@60", position="<far right>x0", scale=1})'`
-  and a window rule / `hl.dsp.window.move` to send `class:aquamarine` there.
-  `show` moves it to the active workspace as a float (`hl.dsp.window.float`,
-  `hl.dsp.window.resize({size={W,H}, exact=true})`, `window.center`); `hide`
-  sends it back.
+- **Safety correction before implementation:** creating a headless output and
+  moving an already-mapped child there is not a safe startup sequence. The
+  child can appear or take focus before the move. A lab must have offscreen
+  placement and no-initial-focus rules installed **before** its first map;
+  do not launch it if those prerequisites cannot be established. The probe
+  did not prove this startup guarantee.
+- The proposed host headless-output operations are
+  `hyprctl output create headless <name>` and an output-specific
+  `hl.monitor({output="<name>", mode="WxH@60", position="<negative x>x0", scale=1})`.
+  These target an output, not a window. Neil explicitly authorized a narrow
+  exception on 2026-09-09: omalab-owned headless output lifecycle operations
+  and read-only host discovery are allowed. Physical-output configuration,
+  visible windows before `show`, focus changes, workspace switching, and host
+  keywords remain forbidden. No real desktop config files may be modified.
+  `hyprctl -j monitors all`, `hyprctl -j activeworkspace`, and
+  `hyprctl -j clients` are permitted read-only discovery/verification calls;
+  they do not dispatch actions or change compositor state.
+- Omarchy's `default/hypr/helpers.lua` implements `o.window` through
+  `hl.window_rule`; its `apps/webcam-overlay.lua` uses `no_initial_focus`.
+  The current [window-rule documentation](https://wiki.hypr.land/Configuring/Basics/Window-Rules/)
+  distinguishes initial placement effects from later window moves. This is
+  source evidence for the required approach, not a runtime proof of safe lab
+  startup. No host commands were run for this correction.
 - **Never** toggle special workspaces, change the active workspace, or run
   `hyprctl keyword` on the host to make a screenshot work. That bounces the
   user's desktop. It happened during the probe and is the reason this file
@@ -59,7 +75,8 @@ observed, not assumed.
 
 ## The shell side
 
-- `omarchy-shell` is `quickshell -n -p $OMARCHY_PATH/shell`. It reads
+- The shell launcher runs `quickshell -n -p $OMARCHY_PATH/shell`; the
+  `omarchy-shell` command itself is only an IPC wrapper. Quickshell reads
   `Quickshell.env("HOME")` for `~/.config/omarchy/shell.json` and
   `~/.config/omarchy/plugins/`, and `$XDG_STATE_HOME/omarchy/current/{theme,background}`
   for colours and wallpaper. So the lab is: `HOME`, `XDG_CONFIG_HOME`,
@@ -84,9 +101,11 @@ observed, not assumed.
   `current/theme` and `current/background`.
 - The shell warns that `org.freedesktop.Notifications` and the polkit agent
   are already registered, and the portal app id is taken. On the shared bus
-  these are harmless; a private `dbus-run-session`/`dbus-daemon --session`
-  per lab removes them and lets `service` plugins (omapager) own the name.
-  Tray, portals and secrets then need `--shared-bus`.
+  notification ownership warnings do not mean the lab owns the service.
+  A private bus allows a service plugin to own a separate notification name,
+  but polkit and hardware-control services must still be disabled. Portal and
+  accessibility warnings can remain on a private bus; do not claim those are
+  removed. `--shared-bus` deliberately shares session services.
 - `QS_DISABLE_FILE_WATCHER=1` as the launcher sets it; omalab restarts
   deliberately. The shell's log is on stdout/stderr; capture it to a file per
   lab so `omalab log` can grep for `TypeError`, `binding loop`, `qml:`.
@@ -101,3 +120,145 @@ private-D-Bus + component-harness rig a review agent built to test a PR at
 four scales without a compositor. No `PanelWindow` under X11, so the widget
 could not instantiate; component-level only. Candidate for a `--x11` backend
 that runs in CI. Not a priority.
+
+## Implementation safety contracts (2026-09-09)
+
+The following operations are authorized by Neil's narrow output-lifecycle
+exception. All use the captured host signature, never an implicit instance:
+
+- Read-only `hyprctl -j monitors [all]`, `activeworkspace`, and `clients`:
+  discover geometry and verify placement without changing state.
+- `hyprctl eval` with `hl.workspace_rule({workspace="name:omalab-<name>",
+  monitor="OMALAB-<name>", default=true})` and an output-specific
+  `hl.monitor(...)`: reserve a named default workspace and offscreen geometry
+  **before** creating that lab's headless output. No workspace dispatcher is
+  called; a named workspace avoids adding numeric buttons to the real bar.
+- `hyprctl output create headless OMALAB-<name>` / `output remove OMALAB-<name>`:
+  only create/remove the lab-owned output; reject a pre-existing name. The
+  create/remove verbs are documented by `hyprctl output --help`; the optional
+  create name was verified by the probe. Omarchy's monitor shape is in
+  `config/hypr/monitors.lua`.
+- `hyprctl eval 'hl.exec_cmd(command, rules)'`: launch only the lab compositor
+  (`aquamarine`). The command uses an unbroken `exec` chain. Rules bind to its
+  PID and `HL_EXEC_RULE_TOKEN` token, not other windows of that class. Effects
+  set the lab monitor/workspace silently, initial no-focus, no-animation,
+  fullscreen coverage, and undecorated opaque rendering. The wrapper waits for
+  `map.allowed`; the caller creates it only after host acknowledgement, so no
+  child Wayland connection can race rule registration.
+- Once the PID is verified on the lab output, `hyprctl eval` dispatches
+  `hl.dsp.window.fullscreen_state({internal=2, client=2, window="address:<lab>"})`
+  through `hl.dispatch`. This only covers the headless output and does not
+  follow or focus the window. The static fullscreen rule alone did not retain
+  fullscreen state. Omarchy's `omarchy-hyprland-window-tiled-fullscreen-toggle`
+  supplies the dispatcher convention; the installed version's Lua binding
+  explicitly supports `window` selectors and defaults to set semantics.
+  Host layers created after this transition can still overlay the lab; a
+  later headless capture must reassert the addressed window's fullscreen
+  transition once those layers exist. No host layer rule may be changed.
+- Teardown disables only the retained lab workspace-rule handle and the
+  exact lab output rule after removing the output. It never reloads host
+  configuration or changes physical-output rules.
+
+The initial far-right parking proposal was wrong: on this host, whose physical
+output uses `position="auto"`, two headless outputs shifted its global x from
+0 to 10198. Windows retained their monitor-relative coordinates, sizes,
+workspace and focus; removing the lab outputs restores the original layout.
+Place lab outputs wholly left of zero and existing outputs instead, without
+changing physical-output rules. A floating child also leaves the *host's*
+top-layer bar above the child in `grim -o` captures. Park the child fullscreen
+on its own output so the capture shows only the lab shell.
+
+Source evidence: installed `/usr/share/hypr/stubs/hl.meta.lua` documents
+`hl.exec_cmd(cmd, rules)` and workspace/monitor specifications; Omarchy uses
+`hl.exec_cmd` in `default/hypr/autostart.lua`. The Hyprland v0.56.2 executor's
+`spawnWithRules` / `applyRuleToProc` functions
+register PID/token properties. Ordinary `hl.window_rule` has no PID matcher;
+Aquamarine hardcodes the class and title, so broad temporary class rules are
+not safe for concurrent instances.
+
+**Shell-side corrections to the probe:** `omarchy-shell` is an IPC wrapper,
+not a launcher. Run `quickshell -n -p "$OMARCHY_PATH/shell"` directly, with
+`QS_DISABLE_FILE_WATCHER=1` and `QS_NO_RELOAD_POPUP=1` as in
+`bin/omarchy-launch-shell`. A private bus alone does not isolate hardware
+control: built-in idle, lock, battery, polkit, and night-light services are
+disabled in the generated `shell.json`. Idle timeout zero means *immediate
+lock*, not disabled. The battery service calls `omarchy-powerprofiles-set`;
+lock can change brightness; polkit registers a machine-level agent.
+
+The built-in notification service is also disabled by default, leaving
+`org.freedesktop.Notifications` available to the plugin under development.
+`--plus omarchy.notifications` opts into stock notifications. This uses the
+shell's existing `disabledPlugins` mechanism, not plugin-specific source
+inspection or an omapager special case.
+
+Scratch HOME/XDG directories and a private bus are **not a security sandbox**.
+Plugins still run as the user. For example, omaherdr reads `/proc` and can
+control host terminal panes on an interactive jump. The headless proof loads
+its daemon but never requests a jump. No automatic host session lock,
+power-profile change, or broad window rule is part of lab startup.
+
+Keep a private `XDG_RUNTIME_DIR` too: otherwise Quickshell, Hyprland and
+D-Bus-activated helpers create state outside `omalab/`. The host Wayland
+display must then be an absolute socket path. Do **not** use the long
+`<lab>/runtime` pathname directly: Linux AF_UNIX paths stop at 107 bytes.
+Hyprland silently truncated `.socket.sock` and `.socket2.sock` into the same
+`.soc` file while `hyprctl` still appeared to answer; Quickshell's event socket
+failed. Use a short owned `omalab/.<slot>` symlink to `<lab>/runtime` and pass
+that spelling to both compositor and clients; reject roots too long for the
+maximum signature before any host mutation. `down` removes the alias too.
+
+## Step 1 proof runs
+
+Commands below used `bin/omalab` from the checkout; all lab windows remained
+on named, negative-coordinate headless outputs. No `show`, host workspace
+dispatcher, focus dispatcher, keyword, config reload, or real config write
+was used.
+
+- `up ~/src/omaquota -n quota`: `exec -n quota hyprctl -j layers` reported
+  `omarchy-background` at layer 0 and `omarchy-bar` at layer 2, both owned by
+  the lab Quickshell. `ipc -n quota shell listPlugins` reported
+  `njpatel.omaquota` enabled. A parked PNG was opened and showed the stock
+  Tokyo Night wallpaper and lab bar. `restart -n quota` replaced only its
+  shell and returned successfully; `log` and supervised `log -f` showed the
+  actual Quickshell log.
+- Concurrently, `up ~/src/omaherdr -n herdr --theme mine --size 1400x900
+  --scale 1.25 --plus omarchy.notifications`: `ls` showed quota and herdr
+  alive at their respective geometry/theme; IPC named the enabled widget and
+  stock notification service. `/proc` showed exactly one daemon carrying
+  `OMALAB_DIR=<herdr lab>` and executing the symlinked checkout. Its widget
+  was inspected in a 1750x1125 PNG. No jump/focus action was invoked.
+- `up ~/src/omapager -n pager`: private `busctl --user --address=<lab bus>
+  list` showed `org.freedesktop.Notifications` owned by lab Quickshell PID
+  1056763. `exec -n pager notify-send -a omalab hi`, followed immediately by
+  `ipc -n pager omapager probe`, returned `toasts:1`, `actions:["hi=[]"]`,
+  one deck and 56-pixel card height. The PNG was opened and the `hi` card
+  inspected. The real bus's notification owner was identical before/after.
+- `up ~/src/omaquota -n shared --shared-bus --theme catppuccin` succeeded;
+  `exec ... printenv DBUS_SESSION_BUS_ADDRESS` equalled the host bus. No
+  notification was sent there, and its notification owner remained unchanged.
+  `down -n shared` removed that lab.
+- Invalid names, zero dimensions/scale, missing `--plus` values, `ls -n`, and
+  `down -n default --all` were rejected. A nonexistent extra plugin failed
+  before creating a host output; `down` removed the retained diagnostics.
+- `down --all` was exercised between implementation runs. Lab directories
+  disappeared; `/proc` scanning found no remaining process carrying their
+  `OMALAB_DIR`, including bus-activated helper processes. No matching nested
+  `Hyprland --config` remained. Physical output geometry returned exactly to
+  its baseline after removing the initial far-right experiments; the corrected
+  negative-coordinate startup preserved physical geometry and, in its measured
+  before/after interval, the active workspace and focused window.
+- SHA-256 fingerprints of the real `shell.json`, theme tree and background
+  stayed identical. ShellCheck v0.11.0 and `bash -n bin/omalab` passed. A
+  verified upstream portable ShellCheck binary was used from runtime proof
+  storage; no package was installed.
+- **Idle acceptance:** after restarting the quota shell, a supervised command
+  slept for 605 seconds without querying or touching the lab, then ran
+  `ipc -n quota shell listPlugins` and
+  `exec -n quota timeout 15 grim <proof>/idle-new-client.png`. It exited 0 at
+  `2026-09-09T11:53:23+04:00`; IPC still named enabled `njpatel.omaquota`.
+  The new PNG was opened and showed the stock lab bar, omaquota's `setup`
+  widget and Tokyo Night wallpaper, not an empty or stale host capture.
+- Final `down --all` after that proof removed quota, herdr and pager, all short
+  runtime aliases and all OMALAB outputs. `/proc` again showed zero processes
+  carrying those lab environments; `ls` printed only its heading. The real
+  config/theme/background fingerprints still matched. **Step 1 complete.**

@@ -40,6 +40,19 @@ theme and wallpaper, your plugin added in its manifest's `defaultSection`.
 `--theme mine` uses your current theme and background instead. Several labs
 run side by side; `-n` names them.
 
+The default lab name is `default`; size defaults to `1280x800` logical pixels
+at scale `1`. `--plus` accepts installed plugin IDs or first-party Omarchy
+IDs. Machine-control services (idle, lock, battery power profiles, polkit and
+night light) are disabled: the real desktop owns those. Stock notifications
+are disabled so a notification plugin can own its private bus name; use
+`--plus omarchy.notifications` when you want the stock notification service.
+
+This is an isolated desktop environment, **not a sandbox for untrusted
+plugins**. Plugins and `exec` commands still run as your user. `--shared-bus`
+deliberately shares the host session bus; only use it when the plugin needs
+host session services. Private runtime sockets also mean host audio services
+are not connected by default.
+
 Every lab carries a small stamp in the bottom-right of the wallpaper: the
 plugin id, its git commit, theme, and size@scale, so a screenshot says where
 it came from. `--no-stamp` for clean product shots.

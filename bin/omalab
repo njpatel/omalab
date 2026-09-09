@@ -1,0 +1,472 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+
+fail() { printf 'omalab: %s\n' "$*" >&2; exit 1; }
+usage() {
+  cat <<'USAGE'
+Usage: omalab up <plugin-dir> [-n NAME] [--theme NAME|mine] [--size WxH]
+                 [--scale N] [--plus PLUGIN-ID ...] [--shared-bus]
+       omalab down [-n NAME | --all]
+       omalab ls
+       omalab log [-n NAME] [-f]
+       omalab ipc [-n NAME] <target> <method> [args...]
+       omalab exec [-n NAME] <cmd...>
+       omalab restart [-n NAME]
+
+Labs default to the name "default". Size is logical pixels (default 1280x800),
+scale defaults to 1, and the default theme is tokyo-night. Extra plugins are
+resolved from your installed plugins or Omarchy's first-party plugins.
+Only the lab's HOME and XDG directories are disposable; this is not a sandbox
+for untrusted plugins. --shared-bus deliberately shares desktop bus services.
+USAGE
+}
+
+[[ ${1:-} != --help && ${1:-} != -h && $# != 0 ]] || { usage; exit 0; }
+[[ -n ${XDG_RUNTIME_DIR:-} && -d $XDG_RUNTIME_DIR ]] || fail 'XDG_RUNTIME_DIR is unavailable'
+[[ -n ${OMARCHY_PATH:-} && -f $OMARCHY_PATH/shell/shell.qml ]] || fail 'OMARCHY_PATH must point to an Omarchy installation'
+HOST_RUNTIME=${OMALAB_HOST_RUNTIME:-$XDG_RUNTIME_DIR}
+ROOT=$HOST_RUNTIME/omalab
+REAL_STATE=${XDG_STATE_HOME:-$HOME/.local/state}
+REAL_CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}
+SELF=$(realpath -- "${BASH_SOURCE[0]}")
+mkdir -p -- "$ROOT"
+[[ ! -L $ROOT && -O $ROOT ]] || fail 'runtime root must be an owned directory, not a symlink'
+
+valid_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$ ]] || fail 'name must be 1-48 letters, digits, underscores or hyphens'; }
+valid_id() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && $1 != *..* ]] || fail "invalid plugin id: $1"; }
+geometry() {
+  [[ $SIZE =~ ^([1-9][0-9]*)x([1-9][0-9]*)$ ]] || fail 'size must be WxH in logical pixels'
+  [[ $SCALE =~ ^[0-9]+([.][0-9]+)?$ ]] || fail 'scale must be a positive number'
+  jq -en --arg size "$SIZE" --argjson scale "$SCALE" '
+    ($size | split("x") | map(tonumber)) as $s |
+    $scale > 0 and $scale <= 4 and all($s[]; . >= 200 and . <= 8192) and
+    all($s[] * $scale; . == floor and . <= 16384)' >/dev/null || fail 'invalid dimensions or scale (200-8192 logical pixels; scale up to 4; integral physical pixels)'
+  read -r PIXEL_W PIXEL_H < <(jq -nr --arg size "$SIZE" --argjson scale "$SCALE" '$size | split("x") | map(tonumber * $scale) | @tsv')
+}
+
+load_lab() {
+  valid_name "$NAME"
+  LAB=$ROOT/$NAME
+  [[ -d $LAB && ! -L $LAB && -f $LAB/meta.json ]] || fail "no lab named $NAME"
+  HOST_SIG=$(jq -er .hostSignature "$LAB/meta.json")
+  HOST_RUNTIME=$(jq -er .hostRuntime "$LAB/meta.json")
+  HOST_DISPLAY=$(jq -er .hostDisplay "$LAB/meta.json")
+  RUNTIME=$(jq -er .runtime "$LAB/meta.json")
+  OUTPUT=$(jq -er .output "$LAB/meta.json")
+  SIZE=$(jq -er .size "$LAB/meta.json")
+  SCALE=$(jq -er .scale "$LAB/meta.json")
+  geometry
+}
+
+lab_env() {
+  ENV_ARGS=(env -u DISPLAY -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u HYPRLAND_INSTANCE_SIGNATURE
+    -u DBUS_SESSION_BUS_ADDRESS -u DBUS_STARTER_ADDRESS -u DBUS_STARTER_BUS_TYPE
+    -u HL_INITIAL_WORKSPACE_TOKEN -u AT_SPI_BUS_ADDRESS
+    "XDG_RUNTIME_DIR=$RUNTIME" "OMALAB_HOST_RUNTIME=$HOST_RUNTIME"
+    "HOME=$LAB/home" "XDG_CONFIG_HOME=$LAB/home/.config"
+    "XDG_STATE_HOME=$LAB/home/.local/state" "XDG_CACHE_HOME=$LAB/home/.cache"
+    "XDG_DATA_HOME=$LAB/home/.local/share" "TMPDIR=$LAB/tmp" "OMALAB_DIR=$LAB"
+    "QS_DISABLE_FILE_WATCHER=1" "QS_NO_RELOAD_POPUP=1")
+  if [[ -f $LAB/env ]]; then
+    local key value
+    while IFS='=' read -r key value; do
+      case $key in
+        WAYLAND_DISPLAY|HYPRLAND_INSTANCE_SIGNATURE|DBUS_SESSION_BUS_ADDRESS)
+          ENV_ARGS+=("$key=$value") ;;
+        *) fail "unknown environment key: $key" ;;
+      esac
+    done < "$LAB/env"
+  fi
+}
+run_lab() { lab_env; "${ENV_ARGS[@]}" "$@"; }
+host() { env XDG_RUNTIME_DIR="$HOST_RUNTIME" WAYLAND_DISPLAY="$HOST_DISPLAY" hyprctl -i "$HOST_SIG" "$@"; }
+host_eval() {
+  local reply
+  reply=$(host eval "$1")
+  [[ $reply == ok ]] || fail "host refused lab operation: $reply"
+}
+
+process_start() {
+  local stat
+  [[ -r /proc/$1/stat ]] || return 1
+  IFS= read -r stat < "/proc/$1/stat" || return 1
+  stat=${stat##*) }
+  local -a fields
+  read -ra fields <<< "$stat"
+  [[ ${fields[0]} != Z ]] || return 1
+  printf '%s\n' "${fields[19]}"
+}
+record_pid() {
+  local role=$1 pid=$2 start
+  start=$(process_start "$pid") || fail "$role exited during startup; see $LAB/$role.log"
+  printf '%s %s %s\n' "$role" "$pid" "$start" >> "$LAB/pids"
+}
+launch() {
+  local role=$1; shift
+  lab_env
+  rm -f -- "$LAB/$role.pid"
+  # Expansion is deliberately in the new session's shell, not the launcher.
+  # shellcheck disable=SC2016
+  "${ENV_ARGS[@]}" setsid --fork bash -c 'printf "%s\n" "$$" > "$1"; shift; exec "$@"' bash "$LAB/$role.pid" "$@" \
+    </dev/null >>"$LAB/$role.log" 2>&1 9>&-
+  local attempt pid
+  for ((attempt=0; attempt<100; attempt++)); do
+    if [[ -s $LAB/$role.pid ]]; then
+      read -r pid < "$LAB/$role.pid"
+      record_pid "$role" "$pid"
+      return
+    fi
+    sleep 0.05
+  done
+  fail "$role did not start; see $LAB/$role.log"
+}
+stop_role() {
+  local wanted=$1 role pid start actual attempt target
+  [[ -f $LAB/pids ]] || return 0
+  while read -r role pid start; do
+    [[ $role == "$wanted" ]] || continue
+    actual=$(process_start "$pid") || continue
+    [[ $actual == "$start" ]] || continue
+    target=-$pid
+    [[ $role != compositor ]] || target=$pid
+    kill -TERM -- "$target" 2>/dev/null || true
+    for ((attempt=0; attempt<100; attempt++)); do
+      process_start "$pid" >/dev/null || break
+      sleep 0.05
+    done
+    if actual=$(process_start "$pid") && [[ $actual == "$start" ]]; then
+      kill -KILL -- "$target" 2>/dev/null || true
+    fi
+  done < "$LAB/pids"
+}
+
+stage_plugin() {
+  local dir=$1 manifest=${2:-$1/manifest.json} id section config=$LAB/home/.config/omarchy/shell.json
+  [[ -f $manifest ]] || fail "no manifest.json in $dir"
+  id=$(jq -er '.id | select(type == "string")' "$manifest")
+  valid_id "$id"
+  case $id in
+    omarchy.idle|omarchy.lock|omarchy.battery|omarchy.polkit|omarchy.nightlight)
+      fail "$id controls the real machine and cannot run in a lab" ;;
+  esac
+  [[ $# == 2 ]] || ln -sfnT -- "$dir" "$LAB/home/.config/omarchy/plugins/$id"
+  section=$(jq -r 'if (.kinds | index("bar-widget")) then .barWidget.defaultSection // "right" else "" end' "$manifest")
+  [[ -z $section || $section == left || $section == center || $section == right ]] || fail "invalid defaultSection for $id"
+  jq --arg id "$id" --arg section "$section" '
+    .plugins = ((.plugins // [] | map(select(.id != $id))) + [{id:$id}]) |
+    .disabledPlugins |= map(select(. != $id)) |
+    if $section != "" then
+      .bar.layout |= with_entries(.value |= map(select(.id != $id))) |
+      .bar.layout[$section] += [{id:$id}]
+    else . end' "$config" > "$config.next"
+  mv -- "$config.next" "$config"
+}
+stage_home() {
+  mkdir -p -- "$LAB/home/.config/omarchy/plugins" "$LAB/home/.local/state/omarchy/current" \
+    "$LAB/home/.cache" "$LAB/home/.local/share" "$LAB/tmp" "$LAB/runtime"
+  local current=$LAB/home/.local/state/omarchy/current source background extra
+  if [[ $THEME == mine ]]; then
+    [[ -d $REAL_STATE/omarchy/current/theme && -f $REAL_STATE/omarchy/current/background ]] || fail 'current host theme/background unavailable'
+    ln -s -- "$REAL_STATE/omarchy/current/theme" "$current/theme"
+    ln -s -- "$REAL_STATE/omarchy/current/background" "$current/background"
+  else
+    valid_id "$THEME"
+    source=$OMARCHY_PATH/themes/$THEME
+    [[ -d $source ]] || source=$REAL_CONFIG/omarchy/themes/$THEME
+    [[ -d $source ]] || fail "theme not found: $THEME"
+    mkdir -- "$current/next-theme"
+    cp -a -- "$source/." "$current/next-theme/"
+    run_lab omarchy-theme-set-templates > "$LAB/theme.log" 2>&1
+    mv -- "$current/next-theme" "$current/theme"
+    local -a backgrounds=()
+    shopt -s nullglob
+    backgrounds=("$current/theme/backgrounds/"*)
+    shopt -u nullglob
+    for background in "${backgrounds[@]}"; do
+      [[ -f $background ]] || continue
+      ln -s -- "$background" "$current/background"
+      break
+    done
+    [[ -L $current/background ]] || fail "theme has no background: $THEME"
+  fi
+  # Machine control belongs to the real desktop. Leave notification ownership
+  # free for the plugin under development (opt in with --plus omarchy.notifications).
+  jq '.disabledPlugins = ((.disabledPlugins // []) + ["omarchy.idle", "omarchy.lock", "omarchy.battery", "omarchy.polkit", "omarchy.nightlight", "omarchy.notifications"] | unique)' \
+    "$OMARCHY_PATH/config/omarchy/shell.json" > "$LAB/home/.config/omarchy/shell.json"
+  stage_plugin "$PLUGIN_DIR"
+  for extra in "${PLUS[@]}"; do
+    valid_id "$extra"
+    source=$REAL_CONFIG/omarchy/plugins/$extra
+    if [[ -f $source/manifest.json ]]; then
+      stage_plugin "$(realpath -- "$source")"
+    else
+      local manifest found=0
+      shopt -s globstar nullglob
+      for manifest in "$OMARCHY_PATH"/shell/plugins/**/manifest.json "$OMARCHY_PATH"/shell/plugins/**/*.manifest.json; do
+        if jq -e --arg id "$extra" '.id == $id' "$manifest" >/dev/null; then
+          stage_plugin "${manifest%/*}" "$manifest"
+          found=1
+          break
+        fi
+      done
+      shopt -u globstar nullglob
+      (( found )) || fail "plugin not installed: $extra"
+    fi
+  done
+}
+
+shell_ready() {
+  local attempt plugins
+  for ((attempt=0; attempt<100; attempt++)); do
+    if plugins=$(run_lab omarchy-shell shell listPlugins 2>/dev/null) &&
+      jq -e --arg id "$PLUGIN_ID" '.[] | select(.id == $id and .enabled == true)' <<< "$plugins" >/dev/null; then
+      return
+    fi
+    sleep 0.1
+  done
+  fail "shell/plugin not ready; see $LAB/shell.log"
+}
+start_shell() {
+  launch shell quickshell -n -p "$OMARCHY_PATH/shell"
+  shell_ready
+}
+
+list_labs() {
+  printf 'NAME\tPLUGIN\tSIZE@SCALE\tTHEME\tAGE\tPROCESSES\n'
+  local dir role pid start actual alive now
+  now=$(date +%s)
+  shopt -s nullglob
+  for dir in "$ROOT"/*/; do
+    [[ -f $dir/meta.json ]] || continue
+    alive=alive
+    if [[ ! -f $dir/pids ]]; then alive=starting; else
+      while read -r role pid start; do
+        actual=$(process_start "$pid") || actual=gone
+        [[ $actual == "$start" ]] || alive=degraded
+      done < "$dir/pids"
+    fi
+    jq -r --arg state "$alive" --argjson now "$now" '[.name,.plugin,(.size+"@"+(.scale|tostring)),.theme,((($now-.created)|tostring)+"s"),$state] | @tsv' "$dir/meta.json"
+  done
+}
+
+create_output() {
+  local monitors x reply attempt
+  monitors=$(host -j monitors all)
+  jq -e --arg name "$OUTPUT" 'all(.[]; .name != $name)' <<< "$monitors" >/dev/null || fail "output already exists: $OUTPUT"
+  # Positive coordinates push auto-positioned physical outputs to their right.
+  x=$(jq --argjson width "$PIXEL_W" '([.[] | select(.disabled == false) | .x] + [0] | min) - $width - 1024' <<< "$monitors")
+  [[ $x =~ ^-?[0-9]+$ ]] || fail 'cannot determine an offscreen output position'
+  # A named default workspace avoids adding numeric workspace buttons to the host bar.
+  host_eval "_G.omalab_workspaces = _G.omalab_workspaces or {}; _G.omalab_workspaces['$OUTPUT'] = hl.workspace_rule({workspace='name:omalab-$NAME', monitor='$OUTPUT', default=true}); hl.monitor({output='$OUTPUT', mode='${PIXEL_W}x${PIXEL_H}@60', position='${x}x0', scale=1, disabled=false})"
+  touch "$LAB/output.configured"
+  reply=$(host output create headless "$OUTPUT")
+  [[ $reply == ok ]] || fail "cannot create output: $reply"
+  touch "$LAB/output.created"
+  for ((attempt=0; attempt<100; attempt++)); do
+    if host -j monitors | jq -e --arg name "$OUTPUT" --argjson w "$PIXEL_W" --argjson h "$PIXEL_H" '.[] | select(.name == $name and .width == $w and .height == $h)' >/dev/null; then return; fi
+    sleep 0.1
+  done
+  fail 'headless output did not become ready'
+}
+
+destroy_lab() {
+  stop_role shell
+  stop_role bus
+  stop_role compositor
+  if [[ -f $LAB/output.created ]]; then
+    local reply
+    reply=$(host output remove "$OUTPUT")
+    [[ $reply == ok ]] || fail "cannot remove output $OUTPUT: $reply"
+    rm -- "$LAB/output.created"
+  fi
+  if [[ -f $LAB/output.configured ]]; then
+    host_eval "if _G.omalab_workspaces and _G.omalab_workspaces['$OUTPUT'] then _G.omalab_workspaces['$OUTPUT']:set_enabled(false); _G.omalab_workspaces['$OUTPUT']=nil end; hl.monitor({output='$OUTPUT', disabled=true})"
+  fi
+  [[ ! -L $RUNTIME || $(readlink -- "$RUNTIME") != "$LAB/runtime" ]] || rm -- "$RUNTIME"
+  rm -rf -- "$LAB"
+}
+
+startup_failed() {
+  local status=$?
+  trap - EXIT INT TERM
+  if (( status != 0 )); then
+    printf 'omalab: startup failed; stopping lab processes (logs retained in %s)\n' "$LAB" >&2
+    stop_role shell
+    stop_role bus
+    stop_role compositor
+    if [[ -f $LAB/output.created ]]; then
+      host output remove "$OUTPUT" >/dev/null || true
+      rm -f -- "$LAB/output.created"
+    fi
+    if [[ -f $LAB/output.configured ]]; then
+      host eval "if _G.omalab_workspaces and _G.omalab_workspaces['$OUTPUT'] then _G.omalab_workspaces['$OUTPUT']:set_enabled(false); _G.omalab_workspaces['$OUTPUT']=nil end; hl.monitor({output='$OUTPUT', disabled=true})" >/dev/null || true
+    fi
+  fi
+  exit "$status"
+}
+
+up() {
+  [[ $# -gt 0 && $1 != -* ]] || fail 'up requires a plugin directory'
+  PLUGIN_DIR=$(realpath -e -- "$1"); shift
+  NAME=default THEME=tokyo-night SIZE=1280x800 SCALE=1 SHARED=0
+  PLUS=()
+  while (( $# )); do
+    case $1 in
+      -n|--theme|--size|--scale)
+        [[ $# -ge 2 && -n $2 ]] || fail "missing value for $1"
+        case $1 in -n) NAME=$2 ;; --theme) THEME=$2 ;; --size) SIZE=$2 ;; --scale) SCALE=$2 ;; esac
+        shift 2 ;;
+      --plus)
+        shift
+        [[ $# -gt 0 && $1 != -* ]] || fail '--plus requires a plugin id'
+        while [[ $# -gt 0 && $1 != -* ]]; do PLUS+=("$1"); shift; done ;;
+      --shared-bus) SHARED=1; shift ;;
+      *) fail "unknown up option: $1" ;;
+    esac
+  done
+  valid_name "$NAME"
+  geometry
+  [[ -f $PLUGIN_DIR/manifest.json ]] || fail 'plugin manifest.json is missing'
+  PLUGIN_ID=$(jq -er .id "$PLUGIN_DIR/manifest.json")
+  valid_id "$PLUGIN_ID"
+  HOST_SIG=${HYPRLAND_INSTANCE_SIGNATURE:?not in a Hyprland session}
+  HOST_DISPLAY=${WAYLAND_DISPLAY:?not in a Wayland session}
+  [[ $HOST_DISPLAY == /* ]] || HOST_DISPLAY=$HOST_RUNTIME/$HOST_DISPLAY
+  OUTPUT=OMALAB-$NAME
+  LAB=$ROOT/$NAME
+  [[ ! -e $LAB ]] || fail "$NAME already exists; use down first"
+  local slot
+  RUNTIME=
+  for ((slot=0; slot<100; slot++)); do
+    if [[ ! -e $ROOT/.$slot && ! -L $ROOT/.$slot ]]; then RUNTIME=$ROOT/.$slot; break; fi
+  done
+  [[ -n $RUNTIME ]] || fail 'no free short runtime slots'
+  (( ${#RUNTIME} + 82 <= 107 )) || fail 'XDG_RUNTIME_DIR is too long for Hyprland Unix socket paths'
+  mkdir -- "$LAB"
+  jq -n --arg name "$NAME" --arg plugin "$PLUGIN_ID" --arg size "$SIZE" --argjson scale "$SCALE" \
+    --arg theme "$THEME" --arg sig "$HOST_SIG" --arg display "$HOST_DISPLAY" --arg output "$OUTPUT" --arg runtime "$HOST_RUNTIME" \
+    --argjson created "$(date +%s)" --argjson shared "$SHARED" --arg childRuntime "$RUNTIME" \
+    '{name:$name,plugin:$plugin,size:$size,scale:$scale,theme:$theme,hostSignature:$sig,hostDisplay:$display,hostRuntime:$runtime,runtime:$childRuntime,output:$output,created:$created,sharedBus:($shared==1)}' > "$LAB/meta.json"
+  trap startup_failed EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  mkdir -- "$LAB/runtime"
+  ln -s -- "$LAB/runtime" "$RUNTIME"
+  stage_home
+  if (( SHARED )); then
+    [[ -n ${DBUS_SESSION_BUS_ADDRESS:-} ]] || fail 'shared session bus is unavailable'
+    printf 'DBUS_SESSION_BUS_ADDRESS=%s\n' "$DBUS_SESSION_BUS_ADDRESS" > "$LAB/env"
+  else
+    printf 'DBUS_SESSION_BUS_ADDRESS=unix:path=%s/bus\n' "$LAB" > "$LAB/env"
+    launch bus dbus-daemon --session --nofork --address="unix:path=$LAB/bus"
+    local attempt
+    for ((attempt=0; attempt<100; attempt++)); do [[ ! -S $LAB/bus ]] || break; sleep 0.05; done
+    [[ -S $LAB/bus ]] || fail 'private bus did not become ready'
+  fi
+  local capture
+  printf -v capture '%q _capture-env %q' "$SELF" "$NAME"
+  cat > "$LAB/hyprland.conf" <<CONFIG
+monitor = WAYLAND-1,${PIXEL_W}x${PIXEL_H}@60,0x0,$SCALE
+misc {
+  disable_hyprland_logo = true
+  disable_splash_rendering = true
+}
+xwayland {
+  enabled = false
+}
+animations {
+  enabled = false
+}
+exec-once = $capture
+CONFIG
+  create_output
+  lab_env
+  local command quoted
+  printf -v command '%q ' "${ENV_ARGS[@]}" "WAYLAND_DISPLAY=$HOST_DISPLAY" "$SELF" _compositor "$NAME"
+  quoted=$(jq -Rn --arg command "exec $command" '$command')
+  # Exec rules are bound by Hyprland to this process's PID/token, not every aquamarine.
+  host_eval "hl.exec_cmd($quoted, {monitor='$OUTPUT silent', workspace='name:omalab-$NAME silent', no_initial_focus=true, no_anim=true, float=true, fullscreen=true, size='${PIXEL_W} ${PIXEL_H}', move='0 0', border_size=0, rounding=0, no_shadow=true, opacity='1 override 1 override 1 override'})"
+  # The host has now registered the PID/token rules. Only now may Hyprland exec.
+  touch "$LAB/map.allowed"
+  for ((attempt=0; attempt<200; attempt++)); do
+    [[ ! -f $LAB/env.ready ]] || break
+    sleep 0.1
+  done
+  [[ -f $LAB/env.ready ]] || fail 'nested compositor did not report its environment'
+  mv -- "$LAB/env.ready" "$LAB/env"
+  local pid client monitor
+  read -r pid < "$LAB/compositor.pid"
+  monitor=$(host -j monitors | jq -er --arg name "$OUTPUT" '.[] | select(.name==$name) | .id')
+  client=$(host -j clients | jq -ce --argjson pid "$pid" --argjson monitor "$monitor" '[.[] | select(.pid==$pid and .class=="aquamarine" and .monitor==$monitor)] | select(length==1) | .[0]') || fail 'child is not uniquely parked on its headless output'
+  jq --arg address "$(jq -r .address <<< "$client")" '.address=$address' "$LAB/meta.json" > "$LAB/meta.next"
+  mv -- "$LAB/meta.next" "$LAB/meta.json"
+  host_eval "hl.dispatch(hl.dsp.window.fullscreen_state({internal=2, client=2, window='address:$(jq -r .address <<< "$client")'}))"
+  start_shell
+  run_lab hyprctl -j layers | jq -e '.. | objects | select(.namespace? == "omarchy-bar")' >/dev/null || fail 'lab bar has no layer'
+  trap - EXIT INT TERM
+  printf 'Lab %s is up: %s %s@%s (%s).\nInspect: omalab ipc -n %s shell listPlugins; omalab log -n %s\n' "$NAME" "$PLUGIN_ID" "$SIZE" "$SCALE" "$THEME" "$NAME" "$NAME"
+}
+
+COMMAND=$1; shift
+# Internal exec targets run in the PID tracked by the host's launch rules.
+case $COMMAND in
+  _compositor)
+    NAME=${1:?}; load_lab
+    exec </dev/null >>"$LAB/compositor.log" 2>&1
+    printf '%s\n' "$$" > "$LAB/compositor.pid"
+    record_pid compositor "$$"
+    [[ ${OMALAB_DIR:-} == "$LAB" && -n ${HL_EXEC_RULE_TOKEN:-} ]] || fail 'compositor requires host exec rules'
+    for ((attempt=0; attempt<200; attempt++)); do
+      [[ ! -f $LAB/map.allowed ]] || break
+      sleep 0.05
+    done
+    [[ -f $LAB/map.allowed ]] || fail 'host did not acknowledge map rules'
+    exec Hyprland --config "$LAB/hyprland.conf" </dev/null >>"$LAB/compositor.log" 2>&1 ;;
+  _capture-env)
+    NAME=${1:?}; valid_name "$NAME"; LAB=$ROOT/$NAME
+    [[ ${OMALAB_DIR:-} == "$LAB" && -f $LAB/meta.json ]] || fail 'not a lab compositor environment'
+    printf 'WAYLAND_DISPLAY=%s\nHYPRLAND_INSTANCE_SIGNATURE=%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' \
+      "${WAYLAND_DISPLAY:?}" "${HYPRLAND_INSTANCE_SIGNATURE:?}" "${DBUS_SESSION_BUS_ADDRESS:?}" > "$LAB/env.ready"
+    exit 0 ;;
+esac
+case $COMMAND in
+  up|down|restart) exec 9>"$ROOT/.lock"; flock 9 ;;
+esac
+if [[ $COMMAND == up ]]; then up "$@"; exit; fi
+NAME=default
+NAMED=0
+if [[ ${1:-} == -n ]]; then [[ $# -ge 2 ]] || fail 'missing lab name'; NAME=$2; NAMED=1; shift 2; fi
+case $COMMAND in
+  ls) [[ $# == 0 && $NAMED == 0 ]] || fail 'ls takes no arguments'; list_labs ;;
+  down)
+    if [[ ${1:-} == --all ]]; then
+      [[ $# == 1 && $NAMED == 0 ]] || fail 'down takes -n NAME or --all'
+      shopt -s nullglob
+      for LAB in "$ROOT"/*/; do
+        [[ -f $LAB/meta.json ]] || continue
+        NAME=$(jq -er .name "$LAB/meta.json"); load_lab; destroy_lab
+      done
+    else
+      [[ $# == 0 ]] || fail 'down takes -n NAME or --all'
+      load_lab; destroy_lab
+    fi ;;
+  log)
+    load_lab
+    if [[ ${1:-} == -f && $# == 1 ]]; then exec tail -n +1 -F "$LAB/shell.log"; fi
+    [[ $# == 0 ]] || fail 'log takes only -f'
+    cat -- "$LAB/shell.log" ;;
+  ipc) [[ $# -ge 2 ]] || fail 'ipc requires target and method'; load_lab; run_lab omarchy-shell "$@" ;;
+  exec) [[ $# -gt 0 ]] || fail 'exec requires a command'; load_lab; run_lab "$@" ;;
+  restart)
+    [[ $# == 0 ]] || fail 'restart takes no arguments'
+    load_lab; PLUGIN_ID=$(jq -er .plugin "$LAB/meta.json")
+    stop_role shell
+    # Retain only currently owned process records; old shell PIDs are no longer state.
+    local_pids=$LAB/pids.next
+    while read -r role pid start; do [[ $role == shell ]] || printf '%s %s %s\n' "$role" "$pid" "$start"; done < "$LAB/pids" > "$local_pids"
+    mv -- "$local_pids" "$LAB/pids"
+    start_shell
+    printf 'Restarted %s\n' "$NAME" ;;
+  *) fail "unknown command: $COMMAND (see --help)" ;;
+esac
