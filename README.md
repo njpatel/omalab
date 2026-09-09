@@ -1,4 +1,4 @@
-![omalab — a disposable Omarchy desktop for plugin development](assets/header.svg)
+![omalab — a disposable Omarchy desktop for plugin development](assets/header.png)
 
 **Develop shell plugins against a real Omarchy desktop without restarting your own.**
 
@@ -261,4 +261,4 @@ validation coverage.
 
 ## License
 
-[Apache-2.0](LICENSE). Header artwork is original SVG artwork under the same license.
+[Apache-2.0](LICENSE). Header artwork and its [editable SVG source](assets/header.svg) use the same license.
