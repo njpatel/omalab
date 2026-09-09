@@ -352,3 +352,44 @@ and after. Snapshots of all original clients' address, PID, class, workspace,
 position and size, plus physical monitor geometry/focus, were also identical.
 `shot -n quota` succeeded after hiding. No workspace-switch or focus
 dispatcher was used. **Step 3 complete.**
+
+## Step 4 proof: stamp service
+
+`stamp/manifest.json` registers the `omalab.stamp` service. Its background-layer
+`PanelWindow` is click-through, has no keyboard focus or exclusive zone, and
+uses `Color.accent` at 42% content opacity. The block-glyph wordmark follows
+the quota/herdr README banner style; monospace facts show plugin, commit,
+dirty marker, theme, logical size@scale and UTC date.
+
+`up` injects the service by symlink unless `--no-stamp`. `OMALAB_STAMP` is compact
+JSON seeded from `stamp.json`; commit/dirty/date refresh when the lab shell
+starts or restarts. Git status uses `--no-optional-locks` to avoid modifying
+the plugin checkout's index. Size-only shots update displayed geometry through
+the stamp's own IPC; scale shots seed the restarted service at the new scale.
+Both paths restore the original label afterward.
+
+An observed resize trap: a background-layer stamp could remain at its old
+position or below the remapped wallpaper after resizing. The service now
+reuses Omarchy's `Ui/ScreenMoveRemap.qml`, pulsing its remap after a geometry
+update so it maps above the wallpaper again. It stays on `WlrLayer.Background`;
+no host layer/window rules are added.
+
+Verification:
+
+- `up ~/src/omaquota -n stamped`, then `shot -n stamped`: opened the PNG and
+  inspected the bottom-right mark, `njpatel.omaquota / a3f0ff90`, theme,
+  `1280x800@1` and date. Child `hyprctl -j layers` placed `omalab-stamp` after
+  `omarchy-background` at level 0, in a 340x119 surface with 32-pixel margins.
+- `up ~/src/omaquota -n clean --no-stamp`, then `shot -n clean`: opened the
+  comparison PNG; the same wallpaper corner had no stamp. The generated
+  plugin list and plugin directory contained no `omalab.stamp`.
+- `shot -n stamped --size 1600x900` retained the stamp at the new bottom-right
+  corner with `1600x900@1`; the cropped detail was opened and inspected after
+  the remap fix. `--scale 2` produced a native-resolution stamp with
+  `1280x800@2`. On restoration, metadata returned to `1280x800@1`.
+- `up ./stamp -n stamp-self --theme catppuccin` developed the stamp as the
+  primary plugin. Its screenshot showed the alternative theme and real
+  `ada0da02+dirty` repository state. No copied plugin checkout or fabricated
+  commit was used.
+- Final restart, stamped/unstamped captures, ShellCheck and Bash syntax checks
+  passed. All stamp development remained headless. **Step 4 complete.**

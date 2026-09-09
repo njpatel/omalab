@@ -6,7 +6,7 @@ fail() { printf 'omalab: %s\n' "$*" >&2; exit 1; }
 usage() {
   cat <<'USAGE'
 Usage: omalab up <plugin-dir> [-n NAME] [--theme NAME|mine] [--size WxH]
-                 [--scale N] [--plus PLUGIN-ID ...] [--shared-bus]
+                 [--scale N] [--plus PLUGIN-ID ...] [--shared-bus] [--no-stamp]
        omalab down [-n NAME | --all]
        omalab ls
        omalab log [-n NAME] [-f]
@@ -67,7 +67,7 @@ load_lab() {
 lab_env() {
   ENV_ARGS=(env -u DISPLAY -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u HYPRLAND_INSTANCE_SIGNATURE
     -u DBUS_SESSION_BUS_ADDRESS -u DBUS_STARTER_ADDRESS -u DBUS_STARTER_BUS_TYPE
-    -u HL_INITIAL_WORKSPACE_TOKEN -u AT_SPI_BUS_ADDRESS
+    -u HL_INITIAL_WORKSPACE_TOKEN -u AT_SPI_BUS_ADDRESS -u OMALAB_STAMP
     "XDG_RUNTIME_DIR=$RUNTIME" "OMALAB_HOST_RUNTIME=$HOST_RUNTIME"
     "HOME=$LAB/home" "XDG_CONFIG_HOME=$LAB/home/.config"
     "XDG_STATE_HOME=$LAB/home/.local/state" "XDG_CACHE_HOME=$LAB/home/.cache"
@@ -83,6 +83,7 @@ lab_env() {
       esac
     done < "$LAB/env"
   fi
+  [[ ! -f $LAB/stamp.json ]] || ENV_ARGS+=("OMALAB_STAMP=$(<"$LAB/stamp.json")")
 }
 run_lab() { lab_env; "${ENV_ARGS[@]}" "$@"; }
 host() { env XDG_RUNTIME_DIR="$HOST_RUNTIME" WAYLAND_DISPLAY="$HOST_DISPLAY" hyprctl -i "$HOST_SIG" "$@"; }
@@ -219,6 +220,7 @@ stage_home() {
       (( found )) || fail "plugin not installed: $extra"
     fi
   done
+  (( STAMP == 0 )) || stage_plugin "$(realpath -- "${SELF%/*}/../stamp")"
 }
 
 shell_ready() {
@@ -232,9 +234,29 @@ shell_ready() {
   done
   fail "shell/plugin not ready; see $LAB/shell.log"
 }
+
+update_stamp() {
+  local checkout commit dirty=false
+  checkout=$(jq -er .pluginDir "$LAB/meta.json")
+  commit=$(git -C "$checkout" rev-parse --short=8 HEAD 2>/dev/null) || commit=unversioned
+  if [[ $commit != unversioned && -n $(git --no-optional-locks -C "$checkout" status --porcelain 2>/dev/null) ]]; then dirty=true; fi
+  jq -c --arg commit "$commit" --argjson dirty "$dirty" --arg size "$SIZE" --argjson scale "$SCALE" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{plugin:.plugin,commit:$commit,dirty:$dirty,theme:.theme,size:$size,scale:$scale,date:$date}' "$LAB/meta.json" > "$LAB/stamp.next"
+  mv -- "$LAB/stamp.next" "$LAB/stamp.json"
+}
 start_shell() {
+  if jq -e .stampEnabled "$LAB/meta.json" >/dev/null; then update_stamp; fi
   launch shell quickshell -n -p "$OMARCHY_PATH/shell"
   shell_ready
+  if jq -e .stampEnabled "$LAB/meta.json" >/dev/null; then
+    run_lab omarchy-shell omalab.stamp geometry "$SIZE" "$SCALE" >/dev/null
+    local attempt
+    for ((attempt=0; attempt<100; attempt++)); do
+      if run_lab hyprctl -j layers | jq -e '.. | objects | select(.namespace?=="omalab-stamp")' >/dev/null; then return; fi
+      sleep 0.05
+    done
+    fail 'stamp did not map; see shell.log'
+  fi
 }
 restart_shell() {
   local role pid start
@@ -321,6 +343,9 @@ shot_geometry() {
   for ((attempt=0; attempt<100; attempt++)); do
     if run_lab hyprctl -j layers | jq -e --argjson w "$PIXEL_W" --argjson h "$PIXEL_H" --argjson scale "$SCALE" \
       '.. | objects | select(.namespace?=="omarchy-background" and .w==($w/$scale) and .h==($h/$scale))' >/dev/null; then
+      if jq -e .stampEnabled "$LAB/meta.json" >/dev/null; then
+        run_lab omarchy-shell omalab.stamp geometry "$SIZE" "$SCALE" >/dev/null
+      fi
       sleep 0.2
       # A completed child frame precedes capture of its parent-composited surface.
       run_lab timeout 10 grim -o "$CHILD_OUTPUT" /dev/null
@@ -465,7 +490,7 @@ startup_failed() {
 up() {
   [[ $# -gt 0 && $1 != -* ]] || fail 'up requires a plugin directory'
   PLUGIN_DIR=$(realpath -e -- "$1"); shift
-  NAME=default THEME=tokyo-night SIZE=1280x800 SCALE=1 SHARED=0
+  NAME=default THEME=tokyo-night SIZE=1280x800 SCALE=1 SHARED=0 STAMP=1
   PLUS=()
   while (( $# )); do
     case $1 in
@@ -478,6 +503,7 @@ up() {
         [[ $# -gt 0 && $1 != -* ]] || fail '--plus requires a plugin id'
         while [[ $# -gt 0 && $1 != -* ]]; do PLUS+=("$1"); shift; done ;;
       --shared-bus) SHARED=1; shift ;;
+      --no-stamp) STAMP=0; shift ;;
       *) fail "unknown up option: $1" ;;
     esac
   done
@@ -502,8 +528,8 @@ up() {
   mkdir -- "$LAB"
   jq -n --arg name "$NAME" --arg plugin "$PLUGIN_ID" --arg size "$SIZE" --argjson scale "$SCALE" \
     --arg theme "$THEME" --arg sig "$HOST_SIG" --arg display "$HOST_DISPLAY" --arg output "$OUTPUT" --arg runtime "$HOST_RUNTIME" \
-    --argjson created "$(date +%s)" --argjson shared "$SHARED" --arg childRuntime "$RUNTIME" \
-    '{name:$name,plugin:$plugin,size:$size,scale:$scale,theme:$theme,hostSignature:$sig,hostDisplay:$display,hostRuntime:$runtime,runtime:$childRuntime,output:$output,created:$created,sharedBus:($shared==1)}' > "$LAB/meta.json"
+    --argjson created "$(date +%s)" --argjson shared "$SHARED" --arg childRuntime "$RUNTIME" --arg checkout "$PLUGIN_DIR" --argjson stamp "$STAMP" \
+    '{name:$name,plugin:$plugin,pluginDir:$checkout,size:$size,scale:$scale,theme:$theme,hostSignature:$sig,hostDisplay:$display,hostRuntime:$runtime,runtime:$childRuntime,output:$output,created:$created,sharedBus:($shared==1),stampEnabled:($stamp==1)}' > "$LAB/meta.json"
   trap startup_failed EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
