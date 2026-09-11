@@ -17,6 +17,7 @@ The backend creates no host monitors and issues no host compositor mutations.
 
 [Quick start](#quick-start) · [Commands](#commands) · [Isolation](#isolation-boundaries)
 · [CI](docs/CI.md) · [Engineering reference](docs/HOW.md) · [Agent skill](skills/omalab/SKILL.md)
+· [Contributing](CONTRIBUTING.md)
 
 ## Requirements
 
