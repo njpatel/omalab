@@ -77,8 +77,6 @@ class Client:
             length -= len(block)
 
     def pointer(self, x, y, buttons=0):
-        if not (0 <= x < self.width and 0 <= y < self.height):
-            raise ValueError("pointer is outside the lab framebuffer")
         self.socket.sendall(struct.pack(">BBHH", 5, buttons, x, y))
         time.sleep(0.06)
 
@@ -101,6 +99,14 @@ def execute(client, command):
         if len(args) != 2:
             raise ValueError("move/click requires framebuffer pixel coordinates X Y")
         x, y = map(int, args)
+        # The first VNC handshake can precede the first native-size frame.
+        # Validate screenshot coordinates against the live child mode instead.
+        result = subprocess.run(["hyprctl", "-j", "monitors"], capture_output=True, text=True, timeout=5)
+        if result.returncode:
+            raise ValueError("cannot read child output geometry")
+        output = next((item for item in json.loads(result.stdout) if item["name"] == "LAB"), None)
+        if output is None or not (0 <= x < output["width"] and 0 <= y < output["height"]):
+            raise ValueError("pointer is outside the lab screenshot")
         client.pointer(x, y)
         if operation == "click":
             try:

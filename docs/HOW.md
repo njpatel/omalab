@@ -225,6 +225,11 @@ commands through a separate lab-only Unix socket; `omalab input` validates the
 selected namespace before connecting. Move/click coordinates are physical
 framebuffer pixels. Named keys/chords use RFB; Unicode text uses `wtype` inside
 the namespace so characters absent from the VNC keyboard layout are not lost.
+The initial WayVNC handshake can report a smaller size before its first captured
+frame. Pointer bounds therefore come from the live child monitor mode, not that
+cached handshake. A native 3840x2160@2 capture exercised a far-edge input point
+and rejection immediately outside the screenshot; no coordinate downscaling is
+applied to the RFB input events.
 
 The controller requests only a one-pixel initialization frame, not a full-screen
 transfer for every input action. Clicks and key chords pair releases, invalid
