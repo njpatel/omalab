@@ -1,448 +1,329 @@
 # Omalab engineering reference
 
-This document records the implementation contracts behind omalab and the traps
-that shaped them. It describes the current `bin/omalab`, not a general recipe
-for nested desktops and not a security boundary.
-
-**Important:** the current host-output backend has caused desktop disruption.
-The historical snapshots below are narrow observations, not proof that adding
-an offscreen monitor is harmless. Bars, monitor-management services and pointer
-layout can still react. The isolated-parent experiment below does not connect
-to the host display and is separate from the existing `bin/omalab` implementation.
-
-## Process and pre-map boundary
-
-A lab is a nested Hyprland compositor running as a Wayland client of the host.
-The child must never map visibly before the host has installed its placement
-rules.
-
-Startup uses the following gate:
-
-1. The host declares the lab's monitor and workspace rules before creating its
-   named headless output.
-2. Host `hl.exec_cmd(command, rules)` registers rules bound to the spawned
-   process's PID and `HL_EXEC_RULE_TOKEN`.
-3. The internal compositor launcher confirms that it has the lab environment
-   and a rule token, then waits for `map.allowed`.
-4. Only after the host call returns does `up` create `map.allowed`, allowing the
-   launcher to `exec Hyprland`.
-
-This avoids a broad rule for Aquamarine's shared class/title and closes the
-race in which the nested compositor could map or take focus before placement.
-The child PID, class, address and monitor are verified before the address is
-recorded or later used.
-
-The nested compositor must not inherit the host
-`HYPRLAND_INSTANCE_SIGNATURE`. Its own signature and display are reported by a
-command run from the child's `hyprland.start` callback; choosing the newest
-instance directory is unsafe when labs start concurrently.
-
-## Host compositor allowlist
-
-Host mutations are intentionally narrow and are always sent to the captured
-host instance, never to an implicit Hyprland instance:
-
-- Read monitor, client, active-workspace and cursor state to calculate placement
-  and verify the exact lab window and input isolation. `hyprctl -j cursorpos`
-  is a read-only observation; input dispatch must target only the child.
-- Declare one named workspace rule and one monitor rule for
-  `OMALAB-<name>`.
-- Create or remove that exact named headless output.
-- Launch the nested compositor with PID/token-bound initial rules.
-- Apply fullscreen transitions to the verified `address:<lab-window>`.
-- For an explicit `show`, float, resize, center and silently move only that
-  address to the currently active workspace. `hide` silently returns the same
-  address to the lab workspace.
-
-Startup, capture and teardown do not dispatch focus, change the active
-workspace, select a workspace, reload host configuration, write desktop
-configuration, use `hyprctl keyword`, alter a physical-output rule, or install
-host layer rules. `show` is the sole operation intended to make a lab visible;
-it still does not explicitly focus the window or switch the user's workspace.
-
-Headless outputs are placed wholly to the left of the leftmost existing output,
-with additional clearance. Positive placement is unsafe: with auto-positioned
-physical displays, adding a far-right output can shift global physical-output
-coordinates. Screenshot overrides may move only the lab output farther left as
-it grows.
-
-The lab window is parked fullscreen on its own output. Static fullscreen rules
-were insufficient by themselves, so capture reasserts an addressed fullscreen
-state transition. No action follows a class selector, current focus or current
-window.
-
-## Child Hyprland configuration
-
-The generated child config is Lua. It declares a single output whose physical
-mode is `logical size × scale`, while its logical position remains `0x0`.
-XWayland, animations, the logo and splash are disabled.
-
-The nested launch intentionally triggers Hyprland's standalone watchdog
-warning, so the config sets only:
-
-```lua
-hl.config({ misc = { disable_watchdog_warning = true } })
-```
-
-It does not enable general error suppression. `debug.suppress_errors` remains
-false, and `hyprctl configerrors` remains the authoritative check for actual
-child configuration errors. A legacy `.conf` file or keyword-based child
-configuration would be a stale implementation path.
-
-## Private HOME, XDG state and sockets
-
-The shell runs against the real Omarchy and Quickshell code, but with private
-writable state:
-
-- `HOME`
-- `XDG_CONFIG_HOME`
-- `XDG_STATE_HOME`
-- `XDG_CACHE_HOME`
-- `XDG_DATA_HOME`
-- `XDG_RUNTIME_DIR`
-- `TMPDIR`
-
-The parent Wayland display is converted to an absolute socket path before the
-child receives it. The child compositor, clients, D-Bus helpers and Quickshell
-then use the private runtime directory.
-
-Unix-domain socket paths are limited to 107 bytes on Linux. Hyprland creates
-several long socket names below `XDG_RUNTIME_DIR`; truncation can make two
-sockets collide while some IPC still appears functional. Omalab therefore
-creates a short, owned alias such as `$XDG_RUNTIME_DIR/omalab/.<slot>` pointing
-to the lab's private runtime directory, passes the short spelling to all child
-processes, and rejects a runtime root that cannot fit the longest expected
-socket name. Teardown removes the alias.
-
-## Shell, plugins and services
-
-`omarchy-shell` is used for IPC; Quickshell itself is launched with the real
-Omarchy shell path. File watching and reload popups are disabled because omalab
-owns deliberate shell restarts.
-
-The lab starts from Omarchy's stock `shell.json`. A plugin checkout is never
-copied: its real directory is symlinked into the private
-`.config/omarchy/plugins/<id>`. The manifest is the contract:
-
-- `id` must be a valid plugin id.
-- Entries in `plugins` are objects of the form `{ "id": "..." }`, not strings.
-- A `bar-widget` is inserted into its manifest's `barWidget.defaultSection`,
-  which must be `left`, `center` or `right`; non-bar plugins are enabled without
-  a bar-layout entry.
-- `--plus` resolves another installed plugin or first-party Omarchy manifest
-  and stages it through the same path.
-
-Because these are real plugins, edits are visible after `restart`, and their
-processes, filesystem access and side effects are real too.
-
-Machine-control services are disabled in the generated shell configuration:
-idle, lock, battery power profiles, polkit and night light. Omalab also refuses
-to stage those ids directly. An idle timeout of zero is not a safe substitute;
-in the shell it can mean immediate lock.
-
-Stock notifications are disabled by default so a service plugin can own
-`org.freedesktop.Notifications` on the private session bus. They can be added
-explicitly with `--plus omarchy.notifications`. Omalab does not fake service
-ownership or provide arbitrary service replacement: plugins must use their
-real manifests and contend for names on the bus they were deliberately given.
-
-Themes are staged with Omarchy's template tool under the private HOME. The
-host-mutating theme setter is not used. `--theme mine` shares only the host's
-current theme and background through symlinks that omalab only reads; it does
-not import plugin configuration, credential files or application state. These
-are ordinary symlinks, not filesystem-enforced read-only mounts.
-
-## D-Bus, Qt and portals
-
-The default is a private session bus, allowing a lab service to own a name that
-the host desktop already owns. `--shared-bus` is an explicit trust decision and
-passes the host session-bus address instead.
-
-A private session bus is not enough to make desktop integration safe. Omalab:
-
-- unsets inherited `QT_QPA_PLATFORMTHEME`, avoiding GTK portal and
-  accessibility initialization against the incomplete private desktop;
-- sets `QT_NO_XDG_DESKTOP_PORTAL=1` on a private bus;
-- sets it to `0` only for an explicit shared bus;
-- leaves shell logging unfiltered so real plugin errors remain visible.
-
-This policy prevents inappropriate private-bus portal integration; it is not a
-D-Bus filter. The system bus is not isolated.
-
-## Private PipeWire
-
-Every lab gets a real private PipeWire server, selected through the lab runtime
-socket even when `--shared-bus` is used. Its configuration provides only the
-native protocol, client-node, metadata and access modules. It starts no ALSA or
-hardware factories, Pulse server, WirePlumber or other session manager.
-
-The result satisfies stock PipeWire clients without attaching lab audio
-controls to the user's devices. Empty device and node lists are expected.
-Using the host PipeWire socket merely to silence a client error would violate
-this boundary.
-
-## Screenshots and restoration
-
-`shot` requires the verified child window to be parked on its lab output and
-the nested compositor to expose exactly one child output. It connects `grim`
-directly to the child's Wayland socket. Capturing the parent headless output is
-not equivalent: parent notification or layer surfaces can appear in the image.
-
-Logical size and scale determine the physical PNG size. A size-only override
-reloads the child monitor declaration and waits for shell relayout without
-restarting Quickshell. A scale change must restart the lab shell at the capture
-scale to rebuild Qt's glyph caches at native resolution; after capture it
-restarts again at the original scale. Those restarts reset transient panels,
-in-memory plugin state and other non-persisted service state.
-
-Capture uses a temporary destination and publishes the PNG atomically only
-after geometry restoration. The exit trap restores the original child Lua
-monitor line, child geometry, host lab-output geometry, fullscreen state and
-stamp metadata after success or a catchable failure. A failed restoration is
-reported rather than hidden.
-
-## Provenance stamp
-
-Unless `--no-stamp` is used, omalab stages `stamp/` as a real service plugin.
-It is a click-through, non-exclusive, non-focusable `WlrLayer.Background`
-`PanelWindow` anchored 32 logical pixels from the bottom-right. Its width is at
-most 340 logical pixels and its content uses the theme accent at 42% opacity.
-The facts record plugin id, commit/dirty state, theme, logical size, scale and
-UTC date.
-
-The wordmark is shape geometry, not block-font text: seven bitmap rows are
-converted into non-overlapping horizontal rectangle runs. Cell size and inset
-are snapped through `Screen.devicePixelRatio`; this avoids font fallback,
-glyph advance, ink-bound and translucent-overlap artifacts. Metadata uses Qt's
-scalable text renderer.
-
-Geometry changes are sent to the service over its own IPC. The panel pulses
-Omarchy's `ScreenMoveRemap` so a resized background-layer surface remaps above
-the wallpaper while remaining on the child background layer. No host layer or
-window rule is involved.
-
-## Video and child input
-
-Optional recording and input tools run through `omalab exec`, preserving the
-full child runtime/display environment. `wf-recorder` can capture the child's
-output directly; a bounded timeout sends SIGINT to finalize the video before
-teardown. Video-only capture does not enable microphone or host-audio recording.
-
-The verified Hyprland cursor dispatcher updates that compositor's own pointer
-manager. `wtype` uses its Wayland virtual-keyboard protocol. Mouse-button
-`send_key_state` dispatches have an important protocol detail in 0.56.2: they
-send button events without a pointer frame. Flushing each press/release with
-child pointer motion made a Qt test control receive the intended click; bare
-button commands alone were insufficient. The [automation recipes](../skills/omalab/automation.md)
-include the tested sequence and coordinate scaling rules.
-
-Never substitute host dispatches or kernel-global injection tools. Environment
-variables do not sandbox or redirect host-wide injection through tools such as
-`ydotool` or `/dev/uinput`. Prefer plugin IPC for directly establishing state.
-
-## Teardown and failure state
-
-Normal teardown stops the shell, private PipeWire server, private bus and child
-compositor; removes only the named lab output; disables the exact named
-workspace and output rules; removes the short runtime alias; then deletes the
-lab directory. PID start times are recorded so a recycled PID is not killed by
-mistake.
-
-Failed startup stops owned processes and removes the created output, but retains
-the lab directory and logs for diagnosis until an explicit `down`. The host Lua
-workspace handle is disabled and discarded. The monitor declaration is changed
-to `disabled=true` rather than erased through a host reload, so Hyprland may
-retain an inert disabled rule in runtime state; no physical output is targeted.
-
-`down` destroys private runtime state. A later `up` is a fresh shell environment,
-not a resume. Use unique names for concurrent or automated work, and preserve
-logs or screenshots before cleanup.
-
-## Security and isolation limits
-
-Omalab is for trusted plugin development, not untrusted-code execution. There
-are no user, mount, PID or network namespaces. A plugin and `omalab exec`
-command run as the user and can reach the user's filesystem, network, `/proc`
-and system bus. With `--shared-bus`, they can also reach host session-bus
-services. Credential files are not copied, but arbitrary environment variables
-and agent sockets are inherited. A plugin can use those credentials or seek
-them elsewhere in the host filesystem.
-
-The boundary protects ordinary desktop state from accidental shell-plugin
-experimentation. It does not provide containment against malicious code.
-
-## Validation record
-
-The following behavior was measured during implementation; this is a compact
-record of those runs, not a claim of fresh verification or future-version
-compatibility:
-
-- Hyprland 0.56.2 and Quickshell 0.3.1 started multiple concurrent labs with
-  distinct child signatures, private runtimes and negative-coordinate outputs.
-- A parked lab remained responsive after 605 seconds without polling or a
-  keepalive; IPC and a newly connected screenshot client both succeeded.
-- The private session bus allowed the lab shell to own the notification service
-  without changing the host owner. Explicit shared-bus startup was also
-  exercised separately.
-- The private PipeWire core was the recorded lab process and exposed no Device
-  or Node objects.
-- Direct-child captures of a 1280×800 logical desktop were inspected at 1×
-  and 2× (1280×800 and 2560×1600 PNGs), plus fractional scale. Native-scale
-  text was not an enlargement of the scale-1 glyph cache.
-- Size-only capture kept the shell PID. Scale-changing capture restarted the
-  shell. A forced destination failure returned nonzero while restoring the
-  byte-identical generated Lua config and a responsive shell.
-- Explicit show/hide left the active workspace, focus, physical monitor
-  geometry and pre-existing client geometry unchanged in the measured
-  before/after snapshots.
-- Stamp captures at integer and fractional scale showed snapped rectangle edges
-  and correct bottom-right remapping after resize.
-- Child status reported the Lua config provider and Wayland backend; the narrow
-  watchdog option was set, general suppression was unset, and `configerrors`
-  was empty. Corrected raw shell logs retained no baseline Qt/portal/PipeWire
-  plumbing warnings while remaining unfiltered.
-- Final teardown left no recorded lab processes, named lab outputs, short
-  runtime aliases or lab directories, and measured host shell/theme/background
-  content remained unchanged.
-
-- A disposable Qt input probe received virtual-keyboard text, pointer hover and
-  a framed mouse click. The click incremented its counter once while host
-  cursor samples immediately before/after the measured sequence matched.
-  A finalized 1280x800 H.264 video at approximately 30 fps showed the actual
-  typing and click state changes, with no audio track.
-
-For user-facing commands and supported options, use `bin/omalab --help` and the
-project README. This file explains why the implementation is conservative.
-
-## Isolated-parent experiment
-
-The reproducible [experiment runner](../experiments/run-headless.sh) starts a
-real Omarchy shell without creating any output on the user's compositor.
-It is a proof runner, not a drop-in backend release or an implementation of
-the normal CLI's `show`/`hide` lifecycle. Run `--help` before using it.
-
-### What was tried
-
-1. **Standalone Hyprland 0.56.2:** started inside a Bubblewrap boundary with no
-   host display socket, DRM card devices, input devices or system/login bus.
-   Aquamarine 0.14.0's headless backend returns no DRM allocator; without a DRM
-   or Wayland backend, startup failed with `no allocator available`. An ordinary
-   environment-variable-only standalone headless launch is not proven here.
-2. **Headless Weston 15.0.1:** started successfully using the GPU render node
-   only, but Aquamarine requested `wl_compositor` version 6 while the parent
-   advertised version 5, terminating the client connection.
-3. **Headless Cage 0.3.1 / wlroots 0.20:** likewise started without a host
-   connection, but Aquamarine requested `xdg_wm_base` version 6 while this parent
-   advertised version 5.
-4. **Cage with a temporary corrected Aquamarine library:** succeeded after
-   negotiating `min(advertised, supported)` for those two globals. This was a
-   separate build loaded only inside the experiment, not a replacement for
-   the machine's installed library.
-
-The tested compatibility patch is preserved in
-[`experiments/aquamarine-parent-versions.patch`](../experiments/aquamarine-parent-versions.patch).
-It applies to Aquamarine v0.14.0, commit
-`a79fb21b2e2a82dd061a6d071802bcf38bd5c383`, ABI 13. This is experimental evidence,
-not an assertion that an upstream release already contains the fix.
-
-### Boundary and launch shape
+This document records the contracts behind the default `bin/omalab` backend,
+not a general nested-desktop recipe. The public CLI remains the entry point;
+`bin/omalab-setup` prepares its private runtime separately.
+
+## Process and display boundary
 
 ```text
-host desktop — no lab output, no lab Wayland connection
-
-Bubblewrap namespace
-  headless Cage (GPU render node only)
-    Hyprland (LAB memory output belongs to this child)
-      real Omarchy shell + read-only plugin checkout
+host: omalab CLI                         show only: ordinary VNC viewer
+          |                                         |
+          |                                  private UNIX socket
+          v                                         |
+Bubblewrap namespace                                |
+  headless Cage (GPU render node only)               |
+    Hyprland (private LAB headless output) -- WayVNC --+
+      real Omarchy shell + read-only live plugin mounts
       private D-Bus and PipeWire
       grim / wf-recorder / child input
 ```
 
-The boundary uses new user, mount, PID, IPC and network namespaces; clears the
-environment; provides private `/run`, `/tmp` and `/dev`; mounts system code and
-the plugin read-only; and exposes only a specifically validated
-`/dev/dri/renderD*` node. It does **not** mount host Wayland/X11 sockets, host
-HOME, the system bus, `/dev/input` or DRM `/dev/dri/card*` nodes. Kernel/GPU
-resources are still shared: this is not a VM or a GPU denial-of-service boundary.
+`up` needs no active host desktop. Cage runs with its headless backend and GLES
+renderer on a GPU render node. Hyprland uses Cage's Wayland backend to obtain a
+buffer allocator and renders the shell on its own `LAB` headless output. The
+host Wayland/X11 socket is not mounted. No lab monitor, workspace rule, window
+rule, keyword, focus call or other mutation is sent to the host compositor.
 
-Cage is explicitly restricted to `WLR_BACKENDS=headless`, with GLES rendering
-through that render node. The isolated Hyprland uses Cage to acquire a buffer
-allocator, then creates `LAB` on its own headless backend. No host `hyprctl`
-mutation is performed. Shell IPC works normally when the services share the
-runner's PID namespace. Earlier separate-namespace probes required explicit
-Quickshell instance selection; the runner avoids that mismatch.
+The Bubblewrap keeper owns the lab process lifetime. Commands enter the same
+namespaces through `nsenter`; Quickshell IPC and helper processes therefore
+share the child PID namespace rather than guessing another process's instance.
+The child reports its own display and Hyprland instance; the implementation
+must not inherit a host signature or select the newest compositor directory.
 
-The retained runner produces a 1280x800 screenshot, plugin registry, layer and
-compositor metadata, and logs. An optional command runs in the same isolated
-environment before exit; all its descendants terminate with the PID namespace.
-Only the explicitly supplied artifact directory remains writable/persistent.
-The initial screenshot waits for asynchronous theme loading and must still be
-inspected; shell `ping` alone is not a rendering-ready assertion.
+Only `show` launches a viewer in the caller's current desktop. It connects to
+WayVNC through a private UNIX socket, not a TCP listener. Clipboard transfer,
+remote resize and system-key grabs are disabled. The window is an ordinary
+client subject to the user's window-manager policy, not a specially dispatched
+host window. `hide` closes only that lab's recorded viewer; the desktop and
+private VNC server remain running. Visible inspection requires explicit user
+permission. The integrated viewer was tested on an offscreen X server without
+opening a window on the user's real desktop; placement/focus follow normal
+window-manager policy. TigerVNC needs `DISPLAY` (X11/XWayland) only for `show`.
 
-### Reproducing the experiment
+## Private runtime and compatibility patch
 
-Prerequisites: Bubblewrap with working user namespaces, Cage 0.3.1 with wlroots
-0.20, the verified Omarchy stack, an accessible GPU render node, and a build of
-Aquamarine 0.14.0 with the patch above. Building the library needs its normal
-CMake/compiler/development dependencies. The runner downloads or installs
-nothing and does not alter the system library search path.
+Run `omalab-setup` before first use. Its default destination is
+`${XDG_DATA_HOME:-$HOME/.local/share}/omalab-runtime`; `OMALAB_RUNTIME_DIR` can
+override it for both setup and the CLI. The runtime contains:
 
-From the omalab checkout, with the dependencies already available:
+- `lib/libaquamarine.so.13`: patched Aquamarine v0.14.0;
+- `tools/usr/bin/{cage,wayvnc,vncviewer}` when the system lacks those tools,
+  with their privately supplied library dependencies;
+- `manifest.json` with `format: 1` and `aquamarineVersion: "0.14.0"`.
+
+The CLI resolves private tools before `PATH` and mounts the runtime read-only
+at `/runtime`. Only the isolated Cage/Hyprland process receives the compatibility
+library path; other lab clients use private tool libraries as needed. The
+ordinary host viewer gets only its tool-library directory, never patched
+Aquamarine. Setup changes no system loader configuration, installs no system
+packages and requires no sudo. There is no compilation on `up`.
+
+Setup targets Arch Linux x86_64 with installed Aquamarine 0.14.0 / ABI 13 and
+its development dependencies. It needs Git, curl, CMake, Ninja, a C++23 compiler,
+pkg-config, binutils, jq, flock and standard utilities. Missing Cage, WayVNC or
+TigerVNC tools are obtained from the configured pacman repositories using the
+local sync database and verified package signatures; this additionally needs
+pacman-key and bsdtar. Setup does not refresh that database. See
+`omalab-setup --help` for the full prerequisite check. A valid existing runtime
+is reused; do not remove or replace one while labs use it.
+
+The compatibility target is Hyprland 0.56.2, Quickshell 0.3.1 and Aquamarine
+0.14.0 (ABI 13). The patch in
+[`support/aquamarine-parent-versions.patch`](../support/aquamarine-parent-versions.patch)
+applies to upstream commit `a79fb21b2e2a82dd061a6d071802bcf38bd5c383`.
+It caps the `wl_compositor` and `xdg_wm_base` bind versions at
+`min(advertised, supported)` instead of requesting version 6 unconditionally.
+This is a local compatibility patch, not a claim that an upstream release
+already includes the fix.
+
+### Why an isolated parent is necessary
+
+The predecessor backend added a virtual output to the host compositor.
+Desktop disruption was reported despite offscreen placement: monitor services,
+bars and pointer layout can react to any added output. Negative coordinates and
+narrow before/after checks were not a sufficient boundary. That path is no
+longer normal usage and must not be used as a fallback.
+
+The isolated-parent investigation established these technical constraints:
+
+1. Direct standalone Hyprland 0.56.2 inside Bubblewrap, with no host display,
+   DRM card, input devices or system/login bus, failed with
+   `no allocator available`. Aquamarine 0.14.0's headless backend supplied no
+   DRM allocator; environment variables alone did not solve it.
+2. Headless Weston 15.0.1 started on a render node, but advertised
+   `wl_compositor` version 5 while Aquamarine requested 6.
+3. Headless Cage 0.3.1 / wlroots 0.20 also started without a host connection,
+   but advertised `xdg_wm_base` version 5 while Aquamarine requested 6.
+4. A separately built Aquamarine library with the two version caps allowed
+   Hyprland and the real Omarchy shell to run under Cage. No system library
+   was replaced.
+
+These facts explain the private patched runtime. Manual experiment builds are
+not an additional normal-user setup path; use `omalab-setup` and the CLI.
+
+## Namespace, filesystem and environment contract
+
+The boundary uses user, mount, PID and IPC namespaces and, by default, a private
+network namespace. HOME, configuration, state, cache, data, runtime and temporary
+storage are private. The environment is reconstructed deliberately rather than
+passing arbitrary inherited variables, tokens or agent sockets to the child.
+Selected installed system code is read-only; host HOME and arbitrary host
+artifact directories are not mounted. Private `/proc`, `/run`, `/tmp` and `/dev`
+do not expose the host process tree or runtime sockets.
+
+Only a validated GPU `/dev/dri/renderD*` node is exposed: no DRM card nodes,
+`/dev/input`, `/dev/uinput`, host display socket or system D-Bus socket. The
+kernel and GPU remain shared, so this is not a VM or a GPU denial-of-service
+boundary. Run trusted code only.
+
+Plugins are live read-only binds, not snapshots. Editing the checkout from the
+host changes the code visible inside the lab; `restart` deliberately reloads
+the shell. The lab cannot write back through the plugin mount. Symlinks in a
+checkout do not grant access to arbitrary host targets. `--plus` plugins and
+the bundled provenance stamp follow the same staging contract.
+
+`exec` enters the running lab's namespaces with its environment and starts in
+**scratch HOME**, not the caller's host working directory. External file paths
+are not made available just because they appear in command arguments. Write
+fixtures in private storage or explicitly stream input/output through the CLI:
 
 ```sh
-work=$(mktemp -d)
-git clone --depth 1 --branch v0.14.0 https://github.com/hyprwm/aquamarine.git "$work/aquamarine"
-git -C "$work/aquamarine" apply "$PWD/experiments/aquamarine-parent-versions.patch"
-cmake -S "$work/aquamarine" -B "$work/aquamarine/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build "$work/aquamarine/build" --target aquamarine -j 4
-AQUAMARINE_LIBDIR="$work/aquamarine/build" \
-  ./experiments/run-headless.sh ./stamp "$work/artifacts"
+omalab exec -n dev sh -c 'cat > "$HOME/fixture.json"' < fixture.json
+omalab exec -n dev sh -c 'cat "$HOME/result.json"' > artifacts/result.json
+omalab log -n dev > artifacts/shell.log
 ```
 
-`CAGE_BIN` can select a separately prepared Cage executable; `RENDER_NODE` can
-select another accessible render node. `OMARCHY_PATH` must identify the installed
-Omarchy source. These are experimental dependencies, not silently added runtime
-requirements of the existing CLI. The investigation unpacked signature-verified
-packages under temporary storage and changed no installed packages.
+The outer shell performs those redirections. `shot` independently accepts a
+host destination and streams child capture bytes out without binding that
+host directory into the namespace.
 
-To exercise your plugin instead, pass its directory. It appears read-only at
-`/plugin` inside the namespace, and artifacts are available at `/artifacts`.
-For example, add `bash -c 'omarchy-shell shell ping'` as the optional command.
-No host graphical environment is required by this runner; it deliberately does
-not support the old backend's desktop integrations or live editable mounts.
+## Child configuration, shell and plugins
 
-### Measured capabilities and limitations
+The child Hyprland config uses the Lua API and declares logical geometry at
+`0x0`, with a physical mode of `logical size × scale`. XWayland, animations,
+logo and splash are disabled. The standalone watchdog warning alone is disabled;
+general configuration errors remain visible through `hyprctl configerrors`.
 
-- Real `omarchy-bar`, wallpaper and bundled service rendered; plugin registry
-  reported the service enabled. Inspected 1280x800 and native 2560x1600 PNGs.
-- Direct child `grim` and a finalized 1280x800 H.264 recording worked without
-  a host display output. Native-scale changes affected the child only.
-- A WayVNC 0.10.1 server bound only a private Unix socket. A non-visible RFB
-  client received the actual framebuffer and delivered typing and clicks to a
-  Qt test UI. The text and click counter changed; host cursor/workspace samples
-  before and after that sequence matched. No TCP listener or host viewer window
-  was opened. This establishes a viable viewer transport, not a finished `show`.
-- A truly headless seat initially has no physical pointer/keyboard. The old
-  dispatcher-only click recipe did not suffice; persistent virtual devices
-  created by WayVNC delivered correct input. This distinction must be retained
-  in the eventual backend's agent input API.
-- The system bus and network are unavailable by design. Stock Bluetooth,
-  NetworkManager and UPower components log unavailable-service diagnostics;
-  those are explicit experimental integration limits, not hidden or filtered.
-- The complete one-namespace runner returned success, preserved artifacts and
-  removed its own temporary state. This proof does not claim live plugin edits,
-  shared host services, a production viewer lifecycle or the ordinary CLI's
-  complete option set. Do not substitute it silently for `omalab up` yet.
-- With no connected viewer and no polling for 605 seconds, shell IPC returned
-  `ok` and a fresh 2560x1600 `grim` capture succeeded. The resulting image was
-  opened and inspected. The isolated parent did not need a visible host window
-  or a periodic keepalive.
-- The one-namespace runner also executed an explicit failing command: it
-  returned status 1, preserved logs/capture artifacts and removed its temporary
-  namespace state rather than leaving the child desktop running.
-- All experiment services were stopped afterward. No experiment Bubblewrap
-  process namespace remained; the host output names, dimensions, positions,
-  scales and disabled flags matched the baseline. No host output was added,
-  no host mutation was dispatched, and no system package/library was installed
-  or replaced. The experiment runner passed ShellCheck v0.11.0 and Bash syntax
-  validation; its retained screenshots were visually inspected.
+Quickshell runs the installed Omarchy shell; `omarchy-shell` provides IPC.
+File watching and reload popups are disabled because omalab owns deliberate
+shell restarts. The lab starts from stock `shell.json`, not the user's plugin
+configuration. Plugin manifests supply valid ids and bar-widget default
+sections (`left`, `center` or `right`); service plugins need no bar slot.
+Additional installed plugins are selected explicitly with `--plus`.
+
+Idle, lock, battery power profiles, polkit and night light are disabled and
+cannot be staged directly. An idle timeout of zero is not a safe substitute:
+it can mean immediate lock. Stock notifications are off so a service plugin
+can own `org.freedesktop.Notifications` on the private bus; enable the stock
+service explicitly with `--plus omarchy.notifications` when needed.
+
+Themes are copied into a private snapshot and generated through Omarchy's
+template tooling, never its host-mutating theme setter. `--theme mine` snapshots
+only the current theme/background; later host theme changes require a new lab.
+
+## Network, D-Bus, portals and audio
+
+Default networking is isolated. Host loopback and external services are not
+available. `--network` explicitly shares the host network namespace, including
+loopback; it is not a per-service firewall. Require authorization before using
+it for integration with host or external services.
+
+The session bus is private by default. `--shared-bus` deliberately weakens that
+boundary by mounting only the explicitly requested filesystem session-bus
+socket. It is not permission to search other users' sockets or guess a bus
+address, and it does not expose the system bus. Network and session-bus sharing
+are independent options.
+
+Qt portal integration is disabled on the private bus and enabled only for an
+explicit shared bus. Inherited platform-theme settings do not leak into the
+private environment. Shell logs remain raw: absent NetworkManager, Bluetooth
+and UPower system services can produce expected unavailable-service diagnostics.
+This is an integration limit, not grounds to suppress QML errors, TypeErrors,
+binding loops or other real plugin failures.
+
+Each lab runs real private PipeWire, including with `--shared-bus`. It starts
+no ALSA/hardware discovery, Pulse server, WirePlumber or session manager. Empty
+device and node lists are expected. Connecting host audio merely to silence a
+warning would violate the intended boundary.
+
+## Screenshots and provenance
+
+`shot` captures the child's `LAB` output with `grim`, not Cage's framebuffer or
+the host desktop. Logical size and scale determine physical PNG dimensions.
+A size-only override waits for relayout without restarting Quickshell. A scale
+change restarts the shell to rebuild native-resolution Qt glyph caches, then
+restarts it again while restoring the original geometry. Transient panels and
+in-memory plugin state reset. For stateful captures, start at the final scale
+before driving the UI.
+
+Capture streams to a temporary host destination and publishes atomically only
+after restoration. Catchable failures restore child geometry, generated config
+and stamp metadata; a failed restoration is reported. No host output geometry
+or fullscreen state is involved. Closing a viewer before scale changes avoids
+showing its transient shell restart; capture itself remains child-only.
+
+The optional stamp is a real background-layer service plugin. It records plugin
+id, commit/dirty state, theme, logical size, scale and UTC date; commit/date
+refresh at shell startup. Its click-through non-focusable panel sits at the
+bottom-right and updates geometry over IPC. Rectangle-based wordmark geometry
+snaps through the screen's device pixel ratio. `--no-stamp` removes provenance,
+not time-dependent content elsewhere in the shell.
+
+## Video and child input
+
+Optional `wf-recorder` and input tools run through `exec` in the same child
+session. Record to private storage, finalize with SIGINT, then export through
+stdout before teardown. The [automation recipes](../skills/omalab/automation.md)
+cover that workflow and coordinate scaling. Video-only recording is not
+permission for microphone, webcam or host-audio capture.
+
+A headless seat has no physical pointer or keyboard. `support/input.py` holds
+a persistent RFB connection to the private WayVNC socket, keeping virtual
+devices available without a visible viewer. The controller serves bounded JSON
+commands through a separate lab-only Unix socket; `omalab input` validates the
+selected namespace before connecting. Move/click coordinates are physical
+framebuffer pixels. Named keys/chords use RFB; Unicode text uses `wtype` inside
+the namespace so characters absent from the VNC keyboard layout are not lost.
+
+The controller requests only a one-pixel initialization frame, not a full-screen
+transfer for every input action. Clicks and key chords pair releases, invalid
+coordinates are rejected, and a cancelled requester does not kill the virtual
+seat. Scrolling/drags are not implemented. Historical dispatcher-only recipes
+on an empty headless seat must not be treated as equivalent.
+
+Never substitute global input injectors, `/dev/uinput`, host `xdotool` or host
+Hyprland dispatch. Prefer stable plugin IPC when available. No host focus or
+workspace manipulation is needed to repair child-session input.
+
+## State, ownership and teardown
+
+Each named lab stores `meta.json` (`format: 2`), `env`, `pids`,
+`supervisor-info.json` and available logs under the user's omalab runtime root.
+Logs include `parent.log`, `supervisor.log`, `shell.log`, `pipewire.log`,
+`input.log`, `bus.log`, `theme.log`, `vnc.log` and `viewer.log` as stages are reached.
+PID start times distinguish owned processes from recycled PIDs; namespace and
+viewer ownership must be checked before entering or terminating them.
+
+Teardown asks the inner supervisor to stop its services, then terminates the
+verified keeper if needed; killing the PID-namespace init removes all remaining
+descendants, including commands entered through `exec`. Parent-death protection
+also covers abrupt outer-supervisor death. Only the named viewer/namespace is
+stopped before state removal. Failed startup retains diagnostics until `down`.
+Old-format records are refused rather than automatically migrated or treated
+as new-backend ownership evidence. Do not erase old records blindly while
+legacy processes may still be running.
+
+`down` is destruction, not suspend/resume. Preserve requested logs, videos,
+screenshots and fixtures first. Use unique names for concurrent tasks and
+never use `down --all` for shared-runner cleanup. SIGKILL, power loss or kernel
+failure can interrupt normal cleanup; inspect retained state before reuse.
+
+## Validation record
+
+These are bounded **historical isolated-parent experiments**, not fresh proof
+of the integrated CLI, setup command, CI job or visible viewer:
+
+- Cage with the private Aquamarine patch rendered the real Omarchy bar,
+  wallpaper and bundled service. 1280×800 and native 2560×1600 PNGs were inspected.
+- Direct-child `grim` capture and a finalized 1280×800 H.264 recording worked
+  without a host display output.
+- WayVNC 0.10.1 bound a private UNIX socket. A non-visible RFB client received
+  the framebuffer and changed a Qt test UI's text and click counter using
+  persistent virtual devices. No TCP listener or viewer window was opened;
+  measured host cursor/workspace samples matched before and after.
+- With no connected viewer or polling for 605 seconds, shell IPC returned `ok`
+  and a fresh 2560×1600 capture succeeded and was inspected.
+- The one-namespace proof runner handled success and an explicit failing child
+  command, preserving artifacts and removing its temporary namespace state.
+  No host output was added and no system package/library was installed or replaced.
+
+### Integrated CLI verification
+
+The normal CLI was exercised after replacing the host-output backend:
+
+- `omalab-setup` fetched the pinned source, verified signed tool packages,
+  built the private compatibility library and published the runtime. Repeating
+  setup reused it without downloads/builds. No system package or library changed.
+- `up`, `ipc`, namespace `exec`, `restart`, `ls`, 1x/2x/size-only `shot` and
+  scoped `down` ran against the real Omarchy shell. Screenshot PNGs and their
+  native dimensions were inspected. A real bar-widget checkout and a notification
+  service checkout also loaded; the latter received and rendered a private-bus
+  notification. Public fixtures remain generic; no production credentials were copied.
+- Five concurrent isolated labs kept distinct state and services. The host
+  output identities and physical geometry remained unchanged; no host output
+  or compositor mutation was used.
+- Host edits to a disposable plugin source changed its actual IPC revision
+  after `restart`. Writing back from inside its mount failed with a read-only
+  filesystem error. A sentinel environment variable was absent, along with
+  host HOME, display sockets, system bus and physical input/card devices.
+- Default network isolation rejected a host-loopback fixture. `--network`
+  permitted that exact fixture without exposing display sockets. The shared-bus
+  option was tested against an independent caller-supplied bus: inside/outside
+  bus IDs matched, with only that socket mounted. No personal session service
+  was needed for that verification.
+- `show` opened one real TigerVNC window on a separate offscreen X server.
+  Repeated show did not duplicate it, its rendered contents were inspected,
+  and `hide` removed only that window while shell IPC continued working.
+  No unapproved window was opened on the user's actual desktop. The ordinary
+  viewer follows the target desktop's placement/focus policy.
+- `input` drove a real Qt field/button without a viewer: text, a Ctrl+A chord,
+  Unicode text, hover and clicks were observed. Out-of-bounds input and a
+  cancelled requester did not kill the controller. A measured input movement
+  left host cursor samples unchanged.
+- A 1280x800 H.264 recording at approximately 30 fps captured real input and
+  was exported from private HOME through `exec`. A 605-second untouched lab
+  still answered IPC and produced a fresh screenshot; the foreground `exec`
+  wrapper returned status zero. Explicit child exit statuses propagate intact.
+- A failed scaled screenshot restored byte-identical child Lua configuration,
+  the original geometry and a working input controller. Abrupt SIGKILL of an
+  owned outer supervisor killed its namespace keeper and descendants. Normal
+  teardown explicitly stops the child compositor before the parent.
+- The updated CI helper passed locally, preserving registry data, native-scale
+  screenshots and logs. An actual artifact-write failure returned nonzero,
+  retained diagnostics and still removed its own lab. Remote GitHub job
+  deployment is not claimed.
+- All task-owned lab namespaces, viewers, test servers and display fixtures
+  were removed. Host output geometry matched the initial baseline. ShellCheck
+  and Bash syntax validation passed for the CLI, setup and smoke helper;
+  the Python input helper's syntax was validated without generated repository files.

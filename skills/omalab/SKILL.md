@@ -9,27 +9,26 @@ Use omalab as an optional workflow aid for trusted Omarchy shell-plugin work.
 It is not a runtime dependency of a plugin and is not a sandbox for untrusted
 code.
 
-## Host-display safety warning
+## Headless backend and permissions
 
-The current backend creates a real `OMALAB-*` virtual output on the host
-compositor. Offscreen placement does not hide it from display settings, bars,
-monitor-management services or the host pointer layout. Desktop disruption has
-been reported; previous narrow before/after checks do not establish safety on
-an actively used desktop.
+The default backend is Bubblewrap → headless Cage → Hyprland's private `LAB`
+output. It mounts no host Wayland/X11 socket, creates no host monitor and makes
+no host compositor mutation. `up`, `shot`, IPC and cleanup do not need an active
+graphical desktop or separate host-display approval. Only `show` launches an
+ordinary visible viewer, and **requires explicit permission for this task**.
 
-Do not automatically run `up` on a personal desktop. Explain this host-display
-side effect and obtain explicit approval for the current task, or use a
-dedicated disposable desktop session. Installing this skill or asking for
-screenshots is not approval to alter the host monitor layout. If disruption
-is reported, stop launching labs and inspect existing state without creating
-another output to reproduce it. This warning is not a backend fix.
+The installed Omarchy stack, an accessible GPU render node, Bubblewrap/user
+namespaces and the private `omalab-setup` runtime are prerequisites. Setup is a
+separate download/build step, not work performed by `up`; do not install system
+packages or prepare missing dependencies without authorization. It prepares
+`${XDG_DATA_HOME:-$HOME/.local/share}/omalab-runtime` (or `OMALAB_RUNTIME_DIR`),
+including a patched Aquamarine 0.14.0 / ABI 13 library and missing viewer/parent
+tools. It does not replace system libraries. Never export the sandbox's private
+library search path into the host desktop.
 
-The repository now includes `experiments/run-headless.sh`, a separately verified
-isolated-parent proof runner. It requires Bubblewrap, Cage and a patched
-Aquamarine build; it is not the default backend or a substitute for the CLI's
-full lifecycle. Read the engineering reference before an explicitly requested
-experiment. Do not install system packages, replace system libraries or remove
-the host-display warning merely because the proof runner works.
+The normal viewer and repeated show/hide were verified on a separate offscreen
+X server, not by opening an unapproved window on the user's desktop. Missing
+prerequisites are never permission to use the old host-output backend.
 
 ## Before acting
 
@@ -38,16 +37,19 @@ the host-display warning merely because the proof runner works.
    and [engineering reference](https://github.com/njpatel/omalab/blob/main/docs/HOW.md),
    or their local copies beside the installed CLI checkout, for isolation
    boundaries. These are omalab's docs, not the plugin repository's README.
-3. Treat the plugin checkout as trusted code running as the current user. The
-   lab has a scratch HOME/XDG environment, but it can still access the
-   filesystem, network, `/proc` and system bus. Inherited environment variables
-   and agent sockets may expose credentials; scratch HOME is not containment.
+3. Treat the plugin checkout as trusted code. The lab has private HOME/XDG,
+   mount/PID/user/IPC and default network namespaces; arbitrary host HOME,
+   inherited secrets, agent sockets and the system bus are not exposed.
+   The kernel and GPU remain shared: this is not a VM-grade security sandbox.
 4. Use a unique lab name for each task or concurrent agent. Do not reuse,
    replace or remove a lab you did not create.
 5. Decide deliberately whether the plugin needs credentials or host services.
    Do not copy secrets into the lab unless the user explicitly authorizes it.
-   Avoid `--shared-bus`; use it only when the user authorizes access to host
-   session services and the plugin genuinely requires them.
+   Avoid `--shared-bus` and `--network` unless each needed integration is
+   explicitly authorized. `--shared-bus` exposes only the requested filesystem
+   session-bus socket, not the system bus. `--network` shares host networking,
+   including host loopback and external services. Neither is a filtered allowlist.
+   Never guess cross-session or cross-user socket paths.
 
 ## Conservative workflow
 
@@ -57,18 +59,25 @@ Use this order, adapting IPC targets and screenshot geometry to the plugin:
 omalab up <plugin-dir> -n <unique-name>
 omalab ipc -n <unique-name> <target> <method> [args...]
 omalab exec -n <unique-name> <command> [args...]
+omalab input -n <unique-name> <operation> [args...]
 omalab shot -n <unique-name> <artifact.png> [--size WxH] [--scale N]
 omalab log -n <unique-name>
 omalab down -n <unique-name>
 ```
 
-- `up` loads the real plugin checkout through a symlink. Use `restart` after
-  edits when the shell must reload.
+- `up` mounts the real plugin checkout live and read-only. Edit on the host;
+  lab processes cannot write back through that mount. Use `restart` when the
+  shell must reload those edits.
 - Prefer plugin IPC for controlled behavior. Use `exec` only for commands that
-  are safe inside the lab environment and necessary for the task.
+  are safe inside the lab environment and necessary for the task. `exec` starts
+  in scratch HOME, not the host working directory; arbitrary host file paths
+  are unavailable. Export private files through stdout with host redirection,
+  for example `omalab exec -n <name> sh -c 'cat "$HOME/result.json"' > result.json`.
+  `shot` accepts a host file destination itself without mounting its directory.
 - Check the unfiltered shell log for QML errors, TypeErrors, binding loops and
-  plugin-specific failures. Do not dismiss errors merely because credentials
-  or state are intentionally absent.
+  plugin-specific failures. Missing NetworkManager, Bluetooth and UPower are
+  expected no-system-bus limitations; raw logs are not filtered. Missing
+  credentials or state do not excuse unrelated plugin errors.
 - Capture screenshots before cleanup. Inspect image content, not only command
   success or dimensions.
 - A scale override restarts the lab shell for native rendering and again while
@@ -81,11 +90,15 @@ omalab down -n <unique-name>
 
 ## Video and input
 
-Use the [tested automation recipes](automation.md) for optional `wf-recorder`
-video capture, `wtype` keyboard input and child-only Hyprland pointer actions.
-Always route them through `omalab exec -n <owned-lab>`; never target the host
-or use kernel-global input injection as a substitute. The recipes cover the
-pointer-frame requirement for clicks on the verified Hyprland version.
+Use the [automation recipes](automation.md) for `wf-recorder` capture and
+`omalab input` move/click/type/key operations. Recorders run through `exec`;
+record to private storage, finalize, then export through stdout. Input uses the
+lab-local persistent controller and the same private WayVNC socket as the viewer.
+No visible viewer is necessary and no kernel-global injection is used.
+
+Input coordinates are physical pixels in the original screenshot, including its
+scale. Focus fields within the child before typing and verify the resulting UI,
+not just tool exit status. Prefer stable plugin IPC when possible.
 
 Start at the final scale before driving stateful UI. Finish and inspect a video
 before tearing down the lab. Verify actual UI changes, not just successful
@@ -94,7 +107,7 @@ tools without the user's authorization.
 
 ## Visibility and host safety
 
-A normal lab remains parked on a negative-coordinate headless output.
+A normal lab runs headlessly without any window on the user's desktop.
 
 - Never run `omalab show` without explicit permission for this task's visible
   inspection. An earlier preview approval is not blanket permission for future
@@ -106,9 +119,9 @@ A normal lab remains parked on a negative-coordinate headless output.
   Read logs and use the documented lab lifecycle instead.
 - Do not call `omalab down --all` unless the user explicitly authorizes removal
   of every lab. Remove only the unique lab created for this task.
-- Do not use `--shared-bus` without explicit authorization. If it was
-  authorized, remember that lab commands and plugins can reach host session
-  services.
+- Do not use `--shared-bus` or `--network` without explicit authorization.
+  If authorized, account for real side effects through host services/network;
+  teardown cannot undo them. The options are independent trust decisions.
 
 ## Completion checklist
 
@@ -121,9 +134,9 @@ Before reporting completion:
 - Review the lab log without filtering away real diagnostics.
 - Preserve requested artifacts before cleanup.
 - Run `omalab down -n <unique-name>` for only the lab created by this task.
-- Report any intentional missing credentials, empty state, private-audio
-  behavior or scale-restart state loss as a lab limitation, not as successful
-  plugin behavior.
+- Report intentional missing credentials, empty state, isolated network,
+  unavailable system services, private audio or scale-restart state loss as
+  lab limitations, not as successful plugin behavior.
 
 Installation is optional. Do not modify a user's agent configuration without
 an explicit request; the CLI works without this skill or an agent.

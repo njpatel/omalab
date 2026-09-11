@@ -1,16 +1,18 @@
 # Continuous integration
 
-omalab can provide a startup and rendering smoke check for an Omarchy shell
-plugin, but it is not a conventional headless test runner. It needs a real
-parent Hyprland/Wayland session and it runs the plugin as the desktop user.
-Use a dedicated, disposable Omarchy desktop session for trusted code only.
+omalab provides a headless startup and rendering smoke check for an Omarchy
+shell plugin. Its default backend is Bubblewrap → headless Cage → Hyprland's
+private `LAB` output. **No active graphical desktop or host compositor socket
+is needed.** Use a dedicated, disposable, provisioned runner for trusted code.
 
-The measured compatibility baseline is Omarchy 4.0.2, Hyprland 0.56.2,
-Quickshell 0.3.1 and PipeWire 1.6.8. Other combinations have not been verified.
-Stock GitHub-hosted runners, containers, and headless machines without a parent
-Omarchy Hyprland session are unsupported.
+The compatibility target is Omarchy 4.0.2, Hyprland 0.56.2, Quickshell 0.3.1,
+PipeWire 1.6.8 and the private patched Aquamarine 0.14.0 (ABI 13) runtime.
+Headless does not mean dependency-free: the worker needs GPU render-node
+access, Bubblewrap with user namespaces, and the installed Omarchy stack.
+Vanilla GitHub-hosted runners and unprovisioned containers remain unsupported
+without supplying that stack and GPU access.
 
-## What the smoke helper proves
+## What the smoke helper checks
 
 [`../examples/ci-smoke.sh`](../examples/ci-smoke.sh) starts one uniquely named,
 hidden lab at 1280x800 logical pixels, confirms that the plugin is enabled in
@@ -19,7 +21,7 @@ the shell registry, and captures:
 - `plugin-registry.json`
 - `screenshot-1280x800@1.png`
 - `screenshot-1280x800@2.png`
-- the lab's available logs under `logs/`
+- available logs, `meta.json` and `supervisor-info.json` under `logs/`
 
 This checks generic startup, registration and rendering. It does **not** assert
 plugin-specific behavior such as displayed values, IPC results, daemon state,
@@ -35,7 +37,7 @@ before teardown on failure, removes only the lab name it created, and preserves
 the failing status. It does not change the caller's working directory, `HOME`,
 omalab defaults or other labs.
 
-Run it from an already active Omarchy session:
+Run it as the provisioned runner user; no graphical session is required:
 
 ```sh
 OMALAB_BIN=omalab ./examples/ci-smoke.sh /path/to/plugin /path/to/artifacts
@@ -52,34 +54,37 @@ a run/attempt-specific artifact directory so a failed run cannot upload an old
 successful run's screenshots.
 
 The exit trap covers ordinary failures and catchable signals, not SIGKILL,
-power loss or a dead parent compositor. A runner can also disappear before
+power loss or a failed namespace keeper. A runner can also disappear before
 artifact upload runs. Inspect any leftover labs and reset the dedicated
-session/machine before reusing a failed worker; cleanup is not containment.
+machine before reusing a failed worker; cleanup is not a security boundary.
 
 ## Prepare a self-hosted runner
 
-Use a machine, VM or account dedicated to this purpose rather than a personal
-desktop. The runner user must also be the user logged into the graphical
-Omarchy session; do not run the runner as root or as a separate service user.
+Use a machine or account dedicated to this purpose rather than a personal
+desktop. A VM must still expose a suitable GPU render node; omalab does not
+provision GPU virtualization. Run the worker unprivileged, not as root.
 
-1. Install omalab for that user from
-   <https://github.com/njpatel/omalab>, along with the runtime dependencies
-   listed in its README.
-2. Log in graphically to a normal Omarchy session. Keep that parent session
-   running and the machine unsuspended for the entire job. Lock-screen and
-   suspend/resume behavior are not part of the verified runner baseline;
-   provision session availability deliberately on the dedicated worker.
-   Omalab does not disable the host's idle, locking or power policies.
-3. In GitHub, create a self-hosted runner for only the trusted repository or a
-   tightly restricted runner group. Follow GitHub's current registration
-   commands and add a custom `omalab` label.
-4. Open a terminal **inside that Omarchy session**, enter the runner directory,
-   check the inherited environment, and launch the runner in the foreground:
+1. Install the Omarchy stack and runtime dependencies from the
+   [README](../README.md#requirements), including Bubblewrap and util-linux's
+   `nsenter`. Ensure the worker can use unprivileged user namespaces and read
+   and write its assigned `/dev/dri/renderD*` node. Do not grant input devices
+   or DRM card access as a workaround.
+2. Install omalab and run `omalab-setup` as that worker user, outside the job.
+   Setup needs additional build/download dependencies and prepares a private
+   patched Aquamarine library; it does not replace system libraries. Its
+   default is `${XDG_DATA_HOME:-$HOME/.local/share}/omalab-runtime`. If you use
+   `OMALAB_RUNTIME_DIR`, pass the same value to jobs. No build runs on `up`.
+3. Provide an owned, live `XDG_RUNTIME_DIR` and set `OMARCHY_PATH` to the installed
+   Omarchy source. A user service or SSH session can provide this context.
+   Keep the worker awake and available for the job; omalab does not change
+   machine idle, locking or power policies.
+4. Register a self-hosted runner only for the trusted repository or a tightly
+   restricted runner group, following GitHub's current registration commands.
+   Add a custom `omalab` label. Check the runtime context before launching:
 
    ```bash
    (
-   for name in XDG_RUNTIME_DIR WAYLAND_DISPLAY \
-     HYPRLAND_INSTANCE_SIGNATURE OMARCHY_PATH DBUS_SESSION_BUS_ADDRESS; do
+   for name in XDG_RUNTIME_DIR OMARCHY_PATH; do
      [[ -n ${!name:-} ]] || { printf 'missing %s\n' "$name" >&2; exit 1; }
    done
    [[ -d $XDG_RUNTIME_DIR && -O $XDG_RUNTIME_DIR ]] || { printf 'invalid XDG_RUNTIME_DIR ownership\n' >&2; exit 1; }
@@ -90,51 +95,62 @@ Omarchy session; do not run the runner as root or as a separate service user.
    )
    ```
 
-Launching the runner there is important: it inherits the session's real
-`XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`, `HYPRLAND_INSTANCE_SIGNATURE`,
-`OMARCHY_PATH` and D-Bus session address. Do not invent a display such as
-`wayland-1`, select the newest Hyprland signature, copy socket paths from
-another process, or add host-wide compositor rules to make a detached runner
-work.
+The helper intentionally does not require `WAYLAND_DISPLAY`,
+`HYPRLAND_INSTANCE_SIGNATURE` or `DBUS_SESSION_BUS_ADDRESS`. The lab creates its
+own display and private session bus. Do not invent display names, select the
+newest compositor directory, copy other users' socket paths or install host
+compositor rules. No visible viewer is needed in CI.
 
-An SSH login normally lacks the graphical environment. A system service,
-container, login-time agent or long-lived terminal multiplexer may run as the
-right user while still holding missing or stale display, compositor and session
-bus values. Static service `Environment=` entries are especially unsafe because
-the sockets and Hyprland signature change across graphical sessions. Start the
-runner from a fresh terminal in the current session instead.
-
-Stop the runner before logging out or restarting Omarchy. After every graphical
-session or compositor restart, launch a fresh runner process from a fresh
-terminal so it receives the new environment. A runner surviving the restart
-must not continue accepting jobs with its old values.
+The runtime directory must belong to the runner user and remain available for
+the job. Long-lived services must be provisioned with that user context and
+access to the installed stack; a stale or removed runtime directory is not
+fixed by borrowing a desktop session's sockets. `show` alone would require the
+current graphical environment and explicit permission; CI must not call it.
 
 ### Controlling an existing lab over SSH
 
-`up` needs the host session's graphical environment. Commands addressing an
-existing lab recover its compositor and bus from that lab's metadata. They
-still need the matching desktop user, correct `XDG_RUNTIME_DIR`, `OMARCHY_PATH`
-and an installed `omalab` on `PATH`. When your SSH login provides that context:
+Both new and existing labs can be controlled over SSH as the same provisioned
+user, with the correct owned `XDG_RUNTIME_DIR`, `OMARCHY_PATH`, runtime and CLI:
 
 ```sh
 ssh -t lab-host 'omalab exec -n dev bash'
-ssh lab-host 'omalab ipc -n dev shell listPlugins'
+ssh lab-host 'omalab ipc -n dev shell listPlugins' > artifacts/plugin-registry.json
 ```
 
-Here `lab-host` is your configured SSH host and `dev` is a lab you already
-created. `exec` changes environment, not working directory: use `cd "$HOME"`
-inside that shell to work in the scratch home. This is not an SSH backend or
-a way to start a desktop-free lab. If session context is missing, establish it
-from the actual desktop session rather than guessing sockets or changing users.
+`lab-host` is your configured SSH host and `dev` is a lab you own. `exec` starts
+inside the same namespaces in **scratch HOME**, not the host working directory.
+Arbitrary host paths, including CI artifact directories, are not mounted.
+Keep fixtures private and export a generated file through stdout:
+
+```sh
+omalab exec -n dev sh -c 'cat "$HOME/result.json"' > artifacts/result.json
+omalab log -n dev > artifacts/shell.log
+```
+
+`shot` accepts a host destination itself and streams the actual child capture
+there. The helper's artifact directory remains outside the lab. SSH is only
+transport to the CLI, not a separate omalab backend.
 
 ## Trust boundary
 
-A scratch lab `HOME` and private lab bus are isolation from normal desktop
-configuration, not credential containment or a security sandbox. Plugin code
-still runs as the runner user and can inherit arbitrary job environment
-variables and agent sockets, read the host filesystem and `/proc`, use the
-host network and system bus, and deliberately connect to graphical session
-services. Never:
+The lab has private mount/PID/user/IPC namespaces, a rebuilt environment and
+scratch HOME/XDG state. Plugin code is a read-only live mount. Host HOME,
+arbitrary inherited tokens/agent sockets, host display sockets, input devices
+and the system bus are not exposed. Host-side edits to the checkout remain
+visible; the lab cannot write back through that mount.
+
+Networking is private by default. `--network` explicitly shares host networking,
+including loopback and external services; `--shared-bus` independently exposes
+only the requested filesystem session-bus socket. These opt-ins weaken the
+boundary and should not be added to generic smoke jobs. If a plugin needs them,
+authorize that integration deliberately and do not guess cross-session sockets.
+No credentials or personal fixtures should be copied implicitly. Missing
+NetworkManager, Bluetooth and UPower are expected no-system-bus limitations;
+logs remain raw so real plugin errors are still visible.
+
+This is **not VM-grade isolation**: the host kernel and GPU remain shared.
+More importantly, checkout actions, job scripts and other steps run outside
+the lab with the runner user's privileges. Never:
 
 - run code from an untrusted fork or contributor on this runner;
 - trigger it from `pull_request` for fork code;
@@ -154,18 +170,18 @@ private data, filesystem paths or rendered notifications produced by the
 plugin. Review them before sharing, keep artifact retention short, and limit
 repository access. Avoid passing secrets to the job in the first place.
 
-## Serialize access to the desktop
+## Control worker concurrency
 
-Run exactly one runner process against a given Omarchy session and do not attach
-multiple runner registrations to the same desktop. One GitHub runner process
-accepts one job at a time, which is the cross-repository serialization boundary
-when that is the only process using the session.
+Use one runner process per dedicated worker and unique lab names per job. The
+example workflow sets a repository-scoped `concurrency` group, but GitHub's
+groups do not serialize jobs from different repositories. The CLI can own
+distinct concurrent labs; that does not isolate host-side jobs, GPU resource
+contention or artifact paths from each other.
 
-The example workflow also sets a repository-scoped `concurrency` group. That
-prevents overlapping manual jobs in one repository, but GitHub concurrency
-groups do not serialize jobs from different repositories. The single runner
-process is therefore still required. Do not run unrelated desktop automation
-in the session while an omalab job is active.
+Keep runtime setup/updates outside active jobs and never replace the private
+runtime while labs use it. Do not use `down --all` to recover shared workers;
+collect evidence and remove only the failed job's owned lab. Reset the worker
+when ownership or trust cannot be established.
 
 ## GitHub Actions example
 
@@ -197,9 +213,9 @@ This repository's workflow example is configuration guidance. Deployment to a
 remote GitHub self-hosted runner and execution as a GitHub Actions job have not
 been verified.
 
-The helper itself has been exercised locally in a real Omarchy session against
-the bundled service plugin. The successful run produced registry output, both
-native-size screenshots and all available logs, then removed its lab. A forced
-artifact-write failure retained the lab logs, returned a nonzero status and
-still removed only its own lab. That local verification is separate from
-deploying the example workflow on GitHub.
+The updated helper was exercised locally with the integrated isolated backend.
+It produced registry output, 1280x800 and native 2560x1600 screenshots, and all
+available service logs before removing its own lab. An actual artifact-write
+failure returned nonzero, retained diagnostics (including namespace metadata)
+and still performed scoped teardown. No active graphical desktop was used by
+the helper. That local verification is separate from remote GitHub deployment.

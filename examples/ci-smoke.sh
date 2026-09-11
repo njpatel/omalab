@@ -27,15 +27,15 @@ OMALAB_RESOLVED=$(command -v "$OMALAB_COMMAND") || fail "omalab executable not f
 [[ -x $OMALAB_RESOLVED && ! -d $OMALAB_RESOLVED ]] || fail "omalab is not executable: $OMALAB_RESOLVED"
 OMALAB_BIN=$(realpath -e -- "$OMALAB_RESOLVED")
 
-for variable in XDG_RUNTIME_DIR WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE OMARCHY_PATH DBUS_SESSION_BUS_ADDRESS; do
-  [[ -n ${!variable:-} ]] || fail "$variable is unavailable; launch the runner inside the active Omarchy session"
+for variable in XDG_RUNTIME_DIR OMARCHY_PATH; do
+  [[ -n ${!variable:-} ]] || fail "$variable is unavailable; provision the runner's user runtime and installed Omarchy path"
 done
 [[ -d $XDG_RUNTIME_DIR && -O $XDG_RUNTIME_DIR ]] || fail "XDG_RUNTIME_DIR is not an owned directory: $XDG_RUNTIME_DIR"
 [[ -f $OMARCHY_PATH/shell/shell.qml ]] || fail "OMARCHY_PATH is not an Omarchy installation: $OMARCHY_PATH"
 [[ -r /proc/sys/kernel/random/uuid ]] || fail 'the Linux UUID source is unavailable'
 IFS= read -r LAB_UUID < /proc/sys/kernel/random/uuid
 LAB_NAME=ci-${LAB_UUID//-/}
-LAB_ROOT=${OMALAB_HOST_RUNTIME:-$XDG_RUNTIME_DIR}/omalab
+LAB_ROOT=$XDG_RUNTIME_DIR/omalab
 LAB_PATH=$LAB_ROOT/$LAB_NAME
 [[ ! -e $LAB_PATH && ! -L $LAB_PATH ]] || fail "refusing to reuse an existing lab: $LAB_NAME"
 
@@ -48,6 +48,9 @@ collect_logs() {
   done
   if [[ -f $LAB_PATH/meta.json ]]; then
     cp -p -- "$LAB_PATH/meta.json" "$ARTIFACT_DIR/logs/meta.json" || failed=1
+  fi
+  if [[ -f $LAB_PATH/supervisor-info.json ]]; then
+    cp -p -- "$LAB_PATH/supervisor-info.json" "$ARTIFACT_DIR/logs/supervisor-info.json" || failed=1
   fi
   return "$failed"
 }

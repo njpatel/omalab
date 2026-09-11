@@ -1,0 +1,285 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+
+fail() { printf 'omalab-setup: %s\n' "$*" >&2; exit 1; }
+usage() {
+  cat <<'USAGE'
+Usage: omalab-setup [--help]
+
+Prepare the private runtime for omalab; never installs system packages or uses sudo.
+Default: ${XDG_DATA_HOME:-$HOME/.local/share}/omalab-runtime
+Override with an absolute OMALAB_RUNTIME_DIR path.
+
+Requires Arch Linux x86_64, installed Aquamarine 0.14.0 (ABI 13), its development
+libraries, git, cmake, ninja, C/C++23 compilers, pkg-config, jq, readelf, flock,
+Python 3, wtype and coreutils. Missing cage, wayvnc and vncviewer are unpacked with their needed
+package dependencies from configured pacman repositories, requiring pacman,
+pacman-conf, pacman-key, bsdtar, curl and an up-to-date readable signing keyring.
+No repository databases or system keyrings are refreshed or changed.
+
+Builds pinned Aquamarine v0.14.0 with the bundled parent-version negotiation
+patch. Downloads are signature-verified; source HEAD must match the pinned
+commit. Only the shared libraries and unpacked runtime packages are retained.
+A matching complete runtime is left unchanged. Any other existing runtime is
+refused: stop all labs with omalab down -n NAME, then remove it yourself before
+rebuilding. Setup never replaces a runtime that a running lab could be using.
+
+Next: omalab up <plugin-dir> -n dev
+Only omalab show -n dev opens a viewer on your desktop, when you request it.
+USAGE
+}
+
+if [[ $# == 1 && $1 == --help ]]; then usage; exit 0; fi
+[[ $# == 0 ]] || fail 'unexpected argument (see --help)'
+(( EUID != 0 )) || fail 'run as your normal user, not root or sudo'
+
+require() {
+  local binary
+  for binary in "$@"; do
+    command -v "$binary" >/dev/null 2>&1 || fail "missing prerequisite: $binary (see --help; setup does not install system packages)"
+  done
+}
+require realpath dirname basename stat mkdir chmod flock jq sha256sum readelf python3 wtype
+
+VERSION=0.14.0
+COMMIT=a79fb21b2e2a82dd061a6d071802bcf38bd5c383
+SOURCE_URL=https://github.com/hyprwm/aquamarine.git
+SELF=$(realpath -e -- "${BASH_SOURCE[0]}")
+PATCH=$(dirname -- "$(dirname -- "$SELF")")/support/aquamarine-parent-versions.patch
+[[ -f $PATCH && -r $PATCH ]] || fail "bundled patch is missing: $PATCH; keep the omalab checkout intact"
+PATCH_HASH=$(sha256sum -- "$PATCH")
+PATCH_HASH=${PATCH_HASH%% *}
+ROOT=${OMALAB_RUNTIME_DIR:-${XDG_DATA_HOME:-${HOME:?HOME is required}/.local/share}/omalab-runtime}
+[[ $ROOT == /* && $ROOT != *$'\n'* && $ROOT != *$'\t'* ]] || fail 'runtime path must be absolute and contain no newlines or tabs'
+ROOT=$(realpath -ms -- "$ROOT")
+[[ $ROOT != / && ! -L $ROOT ]] || fail 'runtime root must not be / or a symlink'
+PARENT=$(dirname -- "$ROOT")
+BASE=$(basename -- "$ROOT")
+
+private_directory() {
+  local directory=$1 mode
+  [[ -d $directory && -O $directory && ! -L $directory ]] || return 1
+  mode=$(stat -c %a -- "$directory") || return 1
+  (( (8#$mode & 0022) == 0 ))
+}
+
+# Check the nearest existing ancestor before creating any directories. Refusing
+# shared writable parents also keeps the lock and final rename under our control.
+ANCESTOR=$PARENT
+while [[ ! -e $ANCESTOR && ! -L $ANCESTOR ]]; do ANCESTOR=$(dirname -- "$ANCESTOR"); done
+ANCESTOR=$(realpath -e -- "$ANCESTOR")
+private_directory "$ANCESTOR" || fail "runtime parent must be owned by you and not group/world writable: $ANCESTOR"
+mkdir -p -- "$PARENT"
+PARENT=$(realpath -e -- "$PARENT")
+private_directory "$PARENT" || fail "unsafe runtime parent: $PARENT"
+ROOT=$PARENT/$BASE
+LOCK=$ROOT.lock
+if [[ -e $LOCK || -L $LOCK ]]; then
+  [[ -f $LOCK && -O $LOCK && ! -L $LOCK && $(stat -c %h -- "$LOCK") == 1 ]] || fail "unsafe setup lock: $LOCK"
+fi
+exec {LOCK_FD}>>"$LOCK"
+chmod 600 -- "$LOCK"
+flock -n "$LOCK_FD" || fail "another setup owns $LOCK; wait for it to finish"
+
+WORK=
+STAGING=
+cleanup() {
+  local status=$?
+  trap - EXIT
+  [[ -z $STAGING || ! -d $STAGING || ! -O $STAGING ]] || rm -rf -- "$STAGING"
+  [[ -z $WORK || ! -d $WORK || ! -O $WORK ]] || rm -rf -- "$WORK"
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+has_abi13() {
+  local dynamic
+  dynamic=$(LC_ALL=C readelf -d -- "$1") || return 1
+  [[ $dynamic == *'(SONAME)'*'[libaquamarine.so.13]'* ]]
+}
+
+# Use the ELF loader's inspection mode, not LD_LIBRARY_PATH in the host
+# environment (and not the programs' entry points), to check native dependencies.
+LOADER=/lib64/ld-linux-x86-64.so.2
+check_linkage() {
+  local root=$1 file=$2
+  "$LOADER" --library-path "$root/lib:$root/tools/usr/lib" --list "$file" >/dev/null
+}
+
+runtime_ready() {
+  local binary provider path resolved
+  private_directory "$ROOT" || return 1
+  [[ -f $ROOT/manifest.json && -O $ROOT/manifest.json && ! -L $ROOT/manifest.json ]] || return 1
+  jq -e --arg version "$VERSION" --arg commit "$COMMIT" --arg patch "$PATCH_HASH" '
+    .format == 1 and .aquamarineVersion == $version and .aquamarineAbi == 13
+    and .sourceCommit == $commit and .patchSha256 == $patch
+    and (.tools | type == "object")
+  ' "$ROOT/manifest.json" >/dev/null || return 1
+  [[ -d $ROOT/lib && ! -L $ROOT/lib && -f $ROOT/lib/libaquamarine.so.13 ]] || return 1
+  resolved=$(realpath -e -- "$ROOT/lib/libaquamarine.so.13") || return 1
+  [[ $resolved == "$ROOT/lib/"* && -O $resolved ]] || return 1
+  has_abi13 "$resolved" || return 1
+  check_linkage "$ROOT" "$resolved" || return 1
+  for binary in cage wayvnc vncviewer; do
+    provider=$(jq -er --arg binary "$binary" '.tools[$binary].provider' "$ROOT/manifest.json") || return 1
+    case $provider in
+      bundled)
+        path=$ROOT/tools/usr/bin/$binary
+        [[ -x $path ]] || return 1
+        resolved=$(realpath -e -- "$path") || return 1
+        [[ $resolved == "$ROOT/tools/"* && -O $resolved ]] || return 1
+        ;;
+      system) path=$(command -v "$binary") || return 1 ;;
+      *) return 1 ;;
+    esac
+    check_linkage "$ROOT" "$path" || return 1
+  done
+}
+
+if [[ -e $ROOT || -L $ROOT ]]; then
+  if runtime_ready; then
+    printf 'omalab-setup: already ready: %s\n' "$ROOT"
+    printf 'Next: omalab up <plugin-dir> -n dev\n'
+    exit 0
+  fi
+  fail "refusing to replace existing runtime: $ROOT. Stop every lab with omalab down -n NAME, then remove this directory yourself and rerun omalab-setup"
+fi
+
+require uname env git cmake ninja cc c++ pkg-config cp mktemp rm mv
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 && -x $LOADER && -f /etc/arch-release ]] || fail 'this setup supports Arch Linux x86_64 with the system glibc loader only'
+
+system_pkg_config() {
+  env PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig:/usr/share/pkgconfig PKG_CONFIG_SYSROOT_DIR= pkg-config "$@"
+}
+BASELINE=$(system_pkg_config --modversion aquamarine) || fail 'installed Aquamarine development metadata is missing (pkg-config aquamarine)'
+[[ $BASELINE == "$VERSION" ]] || fail "installed Aquamarine is $BASELINE; this patch requires exactly $VERSION / ABI 13; no system libraries were changed"
+SYSTEM_LIBDIR=$(system_pkg_config --variable=libdir aquamarine)
+if [[ ! -f $SYSTEM_LIBDIR/libaquamarine.so.13 ]] || ! has_abi13 "$SYSTEM_LIBDIR/libaquamarine.so.13"; then
+  fail 'installed Aquamarine does not provide the required libaquamarine.so.13 SONAME'
+fi
+require hyprwayland-scanner
+system_pkg_config --print-errors --exists \
+  'libseat >= 0.8.0' 'libinput >= 1.26.0' wayland-client wayland-protocols wayland-scanner \
+  'hyprutils >= 0.8.0' pixman-1 libdrm gbm libudev libdisplay-info hwdata egl gl || \
+  fail 'Aquamarine build dependencies are missing; make its development dependencies available before rerunning setup'
+
+WORK=$(mktemp -d -- "$PARENT/.$BASE.work.XXXXXXXX")
+STAGING=$(mktemp -d -- "$PARENT/.$BASE.staging.XXXXXXXX")
+mkdir -p -- "$STAGING/lib" "$STAGING/tools/usr/bin" "$STAGING/tools/usr/lib"
+printf '[]\n' >"$WORK/packages.json"
+printf '{}\n' >"$WORK/tools.json"
+PACKAGES=()
+for BINARY in cage wayvnc vncviewer; do
+  if BINARY_PATH=$(command -v "$BINARY"); then
+    PROVIDER=system
+    printf 'omalab-setup: using installed %s: %s\n' "$BINARY" "$BINARY_PATH"
+  else
+    PROVIDER=bundled
+    BINARY_PATH=tools/usr/bin/$BINARY
+    case $BINARY in vncviewer) PACKAGES+=(tigervnc) ;; *) PACKAGES+=("$BINARY") ;; esac
+  fi
+  jq --arg binary "$BINARY" --arg provider "$PROVIDER" --arg path "$BINARY_PATH" \
+    '. + {($binary): {provider: $provider, path: $path}}' "$WORK/tools.json" >"$WORK/tools.next.json"
+  mv -- "$WORK/tools.next.json" "$WORK/tools.json"
+done
+
+download() {
+  local url=$1 destination=$2 protocols
+  case $url in
+    https://*|http://*) protocols='=https,http' ;;
+    file:///*) protocols='=file' ;;
+    *) fail "unsupported package URL scheme: $url (only http://, https:// and local file:/// URLs are accepted)" ;;
+  esac
+  curl -q --fail --silent --show-error --location --proto "$protocols" --proto-redir "$protocols" \
+    --output "$destination" --url "$url" || fail "download failed: $url; check configured mirrors/cache and signatures; setup never refreshes package databases"
+}
+
+if (( ${#PACKAGES[@]} )); then
+  require pacman pacman-conf pacman-key bsdtar curl
+  KEYRING=$(pacman-conf GPGDir) || fail 'cannot discover the configured pacman signing keyring'
+  [[ -r $KEYRING/pubring.gpg && -r $KEYRING/trustdb.gpg ]] || fail "pacman signing keyring is not readable: $KEYRING; have its owner prepare the system keyring first"
+  mkdir -- "$WORK/keyring" "$WORK/downloads"
+  # Verification may update GnuPG's trust database; only our private copy is writable.
+  cp -- "$KEYRING/pubring.gpg" "$KEYRING/trustdb.gpg" "$WORK/keyring/"
+  printf 'omalab-setup: resolving missing tools and dependencies from configured repositories\n'
+  # Print-only sync resolution includes dependencies not satisfied by installed
+  # packages, and still fetches an explicit target whose installed file is absent.
+  LC_ALL=C pacman -Sp --noconfirm --print-format $'%n\t%v\t%l' -- "${PACKAGES[@]}" >"$WORK/transaction" || \
+    fail 'pacman could not resolve runtime packages; configure current repository databases outside setup'
+  [[ -s $WORK/transaction ]] || fail 'pacman returned no packages for missing runtime binaries'
+  INDEX=0
+  while IFS=$'\t' read -r PACKAGE PACKAGE_VERSION URL EXTRA; do
+    [[ -n $PACKAGE && -n $PACKAGE_VERSION && -n $URL && -z $EXTRA ]] || fail 'unexpected pacman package URL record'
+    INDEX=$((INDEX + 1))
+    ARCHIVE=$WORK/downloads/$INDEX.pkg.tar
+    printf 'omalab-setup: downloading and verifying %s %s\n' "$PACKAGE" "$PACKAGE_VERSION"
+    download "$URL" "$ARCHIVE"
+    download "$URL.sig" "$ARCHIVE.sig"
+    pacman-key --gpgdir "$WORK/keyring" --verify "$ARCHIVE.sig" "$ARCHIVE" || \
+      fail "package signature is invalid or not trusted: $PACKAGE; no unsigned fallback is allowed"
+    bsdtar -xOf "$ARCHIVE" .PKGINFO >"$WORK/pkginfo" || fail "missing package metadata: $PACKAGE"
+    FOUND_NAME='' FOUND_VERSION='' FOUND_ARCH=''
+    while IFS= read -r LINE; do
+      case $LINE in
+        'pkgname = '*) FOUND_NAME=${LINE#pkgname = } ;;
+        'pkgver = '*) FOUND_VERSION=${LINE#pkgver = } ;;
+        'arch = '*) FOUND_ARCH=${LINE#arch = } ;;
+      esac
+    done <"$WORK/pkginfo"
+    [[ $FOUND_NAME == "$PACKAGE" && $FOUND_VERSION == "$PACKAGE_VERSION" && ( $FOUND_ARCH == x86_64 || $FOUND_ARCH == any ) ]] || \
+      fail "signed package metadata does not match the requested package/version/architecture: $PACKAGE"
+    bsdtar -xf "$ARCHIVE" -C "$STAGING/tools" --no-same-owner --no-same-permissions \
+      --exclude=.PKGINFO --exclude=.BUILDINFO --exclude=.MTREE --exclude=.INSTALL || fail "cannot extract $PACKAGE"
+    HASH=$(sha256sum -- "$ARCHIVE")
+    HASH=${HASH%% *}
+    jq --arg name "$PACKAGE" --arg version "$PACKAGE_VERSION" --arg url "$URL" --arg hash "$HASH" \
+      '. + [{name: $name, version: $version, url: $url, sha256: $hash, signatureVerified: true}]' \
+      "$WORK/packages.json" >"$WORK/packages.next.json"
+    mv -- "$WORK/packages.next.json" "$WORK/packages.json"
+  done <"$WORK/transaction"
+fi
+
+printf 'omalab-setup: fetching Aquamarine v%s at %s\n' "$VERSION" "$COMMIT"
+git -c core.hooksPath=/dev/null init -q "$WORK/source"
+git -C "$WORK/source" -c core.hooksPath=/dev/null -c protocol.allow=never -c protocol.https.allow=always \
+  fetch --depth=1 --no-tags "$SOURCE_URL" refs/tags/v0.14.0 || fail 'could not fetch the pinned Aquamarine source tag'
+FETCHED=$(git -C "$WORK/source" rev-parse 'FETCH_HEAD^{commit}')
+[[ $FETCHED == "$COMMIT" ]] || fail "upstream v0.14.0 resolved to $FETCHED, not pinned $COMMIT; refusing to build"
+git -C "$WORK/source" -c core.hooksPath=/dev/null checkout -q --detach "$COMMIT"
+[[ $(git -C "$WORK/source" rev-parse HEAD) == "$COMMIT" ]] || fail 'source HEAD does not match the pinned commit'
+git -C "$WORK/source" apply --check -- "$PATCH" || fail 'bundled compatibility patch does not apply to the pinned source'
+git -C "$WORK/source" apply -- "$PATCH"
+printf 'omalab-setup: building only Aquamarine (no system install)\n'
+cmake -S "$WORK/source" -B "$WORK/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER="$(command -v cc)" -DCMAKE_CXX_COMPILER="$(command -v c++)" \
+  -DBUILD_TESTING=OFF || fail 'Aquamarine configuration failed; check the reported development dependency/compiler requirements'
+cmake --build "$WORK/build" --target aquamarine --parallel 4 || fail 'Aquamarine build failed; a working C++23 compiler and matching development libraries are required'
+shopt -s nullglob
+LIBRARIES=("$WORK/build"/libaquamarine.so*)
+(( ${#LIBRARIES[@]} )) || fail 'build produced no Aquamarine shared libraries'
+cp -a -- "${LIBRARIES[@]}" "$STAGING/lib/"
+
+jq -n --arg version "$VERSION" --arg commit "$COMMIT" --arg source "$SOURCE_URL" --arg patch "$PATCH_HASH" \
+  --slurpfile packages "$WORK/packages.json" --slurpfile tools "$WORK/tools.json" '
+  {format: 1, aquamarineVersion: $version, aquamarineAbi: 13, sourceUrl: $source,
+   sourceCommit: $commit, patch: "support/aquamarine-parent-versions.patch", patchSha256: $patch,
+   tools: $tools[0], packages: $packages[0]}
+' >"$STAGING/manifest.json"
+
+# Validate the staged payload using the same checks as an already-ready runtime.
+DESTINATION=$ROOT
+ROOT=$STAGING
+runtime_ready || fail 'prepared runtime is incomplete or has unresolved native libraries; no runtime was published (configured repositories must match the installed system)'
+ROOT=$DESTINATION
+[[ ! -e $ROOT && ! -L $ROOT ]] || fail "runtime appeared during setup: $ROOT; refusing to replace it"
+mv -T --no-clobber -- "$STAGING" "$ROOT"
+[[ ! -d $STAGING ]] || fail "runtime appeared during publication: $ROOT; refusing to replace it"
+STAGING=
+printf 'omalab-setup: ready: %s\n' "$ROOT"
+printf 'Aquamarine %s / ABI 13, source %s, patch SHA-256 %s\n' "$VERSION" "$COMMIT" "$PATCH_HASH"
+printf 'Package URLs, versions and SHA-256 hashes: %s/manifest.json\n' "$ROOT"
+printf 'Build sources, downloads and the private verification keyring are discarded. No system packages were installed.\n'
+printf 'Next: omalab up <plugin-dir> -n dev\nOnly when you want a visible viewer: omalab show -n dev\n'
