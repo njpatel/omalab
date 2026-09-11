@@ -4,6 +4,12 @@ This document records the implementation contracts behind omalab and the traps
 that shaped them. It describes the current `bin/omalab`, not a general recipe
 for nested desktops and not a security boundary.
 
+**Important:** the current host-output backend has caused desktop disruption.
+The historical snapshots below are narrow observations, not proof that adding
+an offscreen monitor is harmless. Bars, monitor-management services and pointer
+layout can still react. The isolated-parent experiment below does not connect
+to the host display and is separate from the existing `bin/omalab` implementation.
+
 ## Process and pre-map boundary
 
 A lab is a nested Hyprland compositor running as a Wayland client of the host.
@@ -307,3 +313,136 @@ compatibility:
 
 For user-facing commands and supported options, use `bin/omalab --help` and the
 project README. This file explains why the implementation is conservative.
+
+## Isolated-parent experiment
+
+The reproducible [experiment runner](../experiments/run-headless.sh) starts a
+real Omarchy shell without creating any output on the user's compositor.
+It is a proof runner, not a drop-in backend release or an implementation of
+the normal CLI's `show`/`hide` lifecycle. Run `--help` before using it.
+
+### What was tried
+
+1. **Standalone Hyprland 0.56.2:** started inside a Bubblewrap boundary with no
+   host display socket, DRM card devices, input devices or system/login bus.
+   Aquamarine 0.14.0's headless backend returns no DRM allocator; without a DRM
+   or Wayland backend, startup failed with `no allocator available`. An ordinary
+   environment-variable-only standalone headless launch is not proven here.
+2. **Headless Weston 15.0.1:** started successfully using the GPU render node
+   only, but Aquamarine requested `wl_compositor` version 6 while the parent
+   advertised version 5, terminating the client connection.
+3. **Headless Cage 0.3.1 / wlroots 0.20:** likewise started without a host
+   connection, but Aquamarine requested `xdg_wm_base` version 6 while this parent
+   advertised version 5.
+4. **Cage with a temporary corrected Aquamarine library:** succeeded after
+   negotiating `min(advertised, supported)` for those two globals. This was a
+   separate build loaded only inside the experiment, not a replacement for
+   the machine's installed library.
+
+The tested compatibility patch is preserved in
+[`experiments/aquamarine-parent-versions.patch`](../experiments/aquamarine-parent-versions.patch).
+It applies to Aquamarine v0.14.0, commit
+`a79fb21b2e2a82dd061a6d071802bcf38bd5c383`, ABI 13. This is experimental evidence,
+not an assertion that an upstream release already contains the fix.
+
+### Boundary and launch shape
+
+```text
+host desktop — no lab output, no lab Wayland connection
+
+Bubblewrap namespace
+  headless Cage (GPU render node only)
+    Hyprland (LAB memory output belongs to this child)
+      real Omarchy shell + read-only plugin checkout
+      private D-Bus and PipeWire
+      grim / wf-recorder / child input
+```
+
+The boundary uses new user, mount, PID, IPC and network namespaces; clears the
+environment; provides private `/run`, `/tmp` and `/dev`; mounts system code and
+the plugin read-only; and exposes only a specifically validated
+`/dev/dri/renderD*` node. It does **not** mount host Wayland/X11 sockets, host
+HOME, the system bus, `/dev/input` or DRM `/dev/dri/card*` nodes. Kernel/GPU
+resources are still shared: this is not a VM or a GPU denial-of-service boundary.
+
+Cage is explicitly restricted to `WLR_BACKENDS=headless`, with GLES rendering
+through that render node. The isolated Hyprland uses Cage to acquire a buffer
+allocator, then creates `LAB` on its own headless backend. No host `hyprctl`
+mutation is performed. Shell IPC works normally when the services share the
+runner's PID namespace. Earlier separate-namespace probes required explicit
+Quickshell instance selection; the runner avoids that mismatch.
+
+The retained runner produces a 1280x800 screenshot, plugin registry, layer and
+compositor metadata, and logs. An optional command runs in the same isolated
+environment before exit; all its descendants terminate with the PID namespace.
+Only the explicitly supplied artifact directory remains writable/persistent.
+The initial screenshot waits for asynchronous theme loading and must still be
+inspected; shell `ping` alone is not a rendering-ready assertion.
+
+### Reproducing the experiment
+
+Prerequisites: Bubblewrap with working user namespaces, Cage 0.3.1 with wlroots
+0.20, the verified Omarchy stack, an accessible GPU render node, and a build of
+Aquamarine 0.14.0 with the patch above. Building the library needs its normal
+CMake/compiler/development dependencies. The runner downloads or installs
+nothing and does not alter the system library search path.
+
+From the omalab checkout, with the dependencies already available:
+
+```sh
+work=$(mktemp -d)
+git clone --depth 1 --branch v0.14.0 https://github.com/hyprwm/aquamarine.git "$work/aquamarine"
+git -C "$work/aquamarine" apply "$PWD/experiments/aquamarine-parent-versions.patch"
+cmake -S "$work/aquamarine" -B "$work/aquamarine/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build "$work/aquamarine/build" --target aquamarine -j 4
+AQUAMARINE_LIBDIR="$work/aquamarine/build" \
+  ./experiments/run-headless.sh ./stamp "$work/artifacts"
+```
+
+`CAGE_BIN` can select a separately prepared Cage executable; `RENDER_NODE` can
+select another accessible render node. `OMARCHY_PATH` must identify the installed
+Omarchy source. These are experimental dependencies, not silently added runtime
+requirements of the existing CLI. The investigation unpacked signature-verified
+packages under temporary storage and changed no installed packages.
+
+To exercise your plugin instead, pass its directory. It appears read-only at
+`/plugin` inside the namespace, and artifacts are available at `/artifacts`.
+For example, add `bash -c 'omarchy-shell shell ping'` as the optional command.
+No host graphical environment is required by this runner; it deliberately does
+not support the old backend's desktop integrations or live editable mounts.
+
+### Measured capabilities and limitations
+
+- Real `omarchy-bar`, wallpaper and bundled service rendered; plugin registry
+  reported the service enabled. Inspected 1280x800 and native 2560x1600 PNGs.
+- Direct child `grim` and a finalized 1280x800 H.264 recording worked without
+  a host display output. Native-scale changes affected the child only.
+- A WayVNC 0.10.1 server bound only a private Unix socket. A non-visible RFB
+  client received the actual framebuffer and delivered typing and clicks to a
+  Qt test UI. The text and click counter changed; host cursor/workspace samples
+  before and after that sequence matched. No TCP listener or host viewer window
+  was opened. This establishes a viable viewer transport, not a finished `show`.
+- A truly headless seat initially has no physical pointer/keyboard. The old
+  dispatcher-only click recipe did not suffice; persistent virtual devices
+  created by WayVNC delivered correct input. This distinction must be retained
+  in the eventual backend's agent input API.
+- The system bus and network are unavailable by design. Stock Bluetooth,
+  NetworkManager and UPower components log unavailable-service diagnostics;
+  those are explicit experimental integration limits, not hidden or filtered.
+- The complete one-namespace runner returned success, preserved artifacts and
+  removed its own temporary state. This proof does not claim live plugin edits,
+  shared host services, a production viewer lifecycle or the ordinary CLI's
+  complete option set. Do not substitute it silently for `omalab up` yet.
+- With no connected viewer and no polling for 605 seconds, shell IPC returned
+  `ok` and a fresh 2560x1600 `grim` capture succeeded. The resulting image was
+  opened and inspected. The isolated parent did not need a visible host window
+  or a periodic keepalive.
+- The one-namespace runner also executed an explicit failing command: it
+  returned status 1, preserved logs/capture artifacts and removed its temporary
+  namespace state rather than leaving the child desktop running.
+- All experiment services were stopped afterward. No experiment Bubblewrap
+  process namespace remained; the host output names, dimensions, positions,
+  scales and disabled flags matched the baseline. No host output was added,
+  no host mutation was dispatched, and no system package/library was installed
+  or replaced. The experiment runner passed ShellCheck v0.11.0 and Bash syntax
+  validation; its retained screenshots were visually inspected.

@@ -10,6 +10,13 @@ screenshots, send plugin IPC, and remove the lab when you are finished.
 
 This is a development environment, **not a sandbox for untrusted code**.
 
+> **Host-display caveat:** the current `omalab up` backend adds a virtual monitor
+> to the host compositor. Desktop disruption has been reported despite offscreen
+> placement. Do not treat it as transparent to a personal desktop. A separate
+> [isolated-parent experiment](docs/HOW.md#isolated-parent-experiment) avoids host
+> outputs, but requires additional tools and a tested upstream compatibility patch;
+> it has not replaced the normal CLI.
+
 [Quick start](#quick-start) · [Commands](#commands) · [Isolation](#isolation-boundaries)
 · [CI](docs/CI.md) · [Engineering reference](docs/HOW.md) · [Agent skill](skills/omalab/SKILL.md)
 

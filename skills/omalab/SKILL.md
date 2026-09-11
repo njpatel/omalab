@@ -9,6 +9,28 @@ Use omalab as an optional workflow aid for trusted Omarchy shell-plugin work.
 It is not a runtime dependency of a plugin and is not a sandbox for untrusted
 code.
 
+## Host-display safety warning
+
+The current backend creates a real `OMALAB-*` virtual output on the host
+compositor. Offscreen placement does not hide it from display settings, bars,
+monitor-management services or the host pointer layout. Desktop disruption has
+been reported; previous narrow before/after checks do not establish safety on
+an actively used desktop.
+
+Do not automatically run `up` on a personal desktop. Explain this host-display
+side effect and obtain explicit approval for the current task, or use a
+dedicated disposable desktop session. Installing this skill or asking for
+screenshots is not approval to alter the host monitor layout. If disruption
+is reported, stop launching labs and inspect existing state without creating
+another output to reproduce it. This warning is not a backend fix.
+
+The repository now includes `experiments/run-headless.sh`, a separately verified
+isolated-parent proof runner. It requires Bubblewrap, Cage and a patched
+Aquamarine build; it is not the default backend or a substitute for the CLI's
+full lifecycle. Read the engineering reference before an explicitly requested
+experiment. Do not install system packages, replace system libraries or remove
+the host-display warning merely because the proof runner works.
+
 ## Before acting
 
 1. Read `omalab --help` for the installed CLI contract.
