@@ -12,6 +12,7 @@ This is a development environment, **not a sandbox for untrusted code**.
 
 [Quick start](#quick-start) · [Commands](#commands) · [Isolation](#isolation-boundaries)
 · [CI](docs/CI.md) · [Engineering reference](docs/HOW.md) · [Agent skill](skills/omalab/SKILL.md)
+· [Contributing](CONTRIBUTING.md)
 
 ## Requirements
 
