@@ -26,9 +26,9 @@ The backend creates no host monitors and issues no host compositor mutations.
 - An accessible `/dev/dri/renderD*` GPU render node, Bubblewrap with working
   unprivileged user namespaces, and `nsenter` from util-linux.
 - Hyprland, Quickshell, PipeWire, D-Bus, grim, jq, Git and standard shell tools.
-- Python 3, `wtype`, headless Cage, WayVNC and TigerVNC's `vncviewer`, plus the private
-  patched Aquamarine runtime prepared by **`omalab-setup`** below. Setup has additional
-  download/build dependencies; there is no build on `up`.
+- Python 3, PyGObject, `wtype`, headless Cage, WayVNC and GTK-VNC, plus the private
+  patched Aquamarine runtime prepared by **`omalab-setup`** below. The viewer
+  uses GTK's native Wayland backend; XWayland and TigerVNC are not required.
 
 The compatibility target is Omarchy **4.0.2**, Hyprland **0.56.2**, Quickshell
 **0.3.1**, PipeWire **1.6.8** and Aquamarine **0.14.0 (ABI 13)**. The CLI depends
@@ -64,7 +64,7 @@ packages. Its library search path is set only inside the sandbox; do not export
 Setup targets **Arch Linux x86_64** with installed Aquamarine 0.14.0 / ABI 13
 and its development dependencies. It needs Git, curl, CMake, Ninja, a C++23
 compiler, pkg-config, binutils, jq, flock and standard utilities. Supplying
-missing Cage/WayVNC/TigerVNC tools also needs the configured pacman repositories,
+missing Cage/WayVNC/GTK-VNC libraries also needs the configured pacman repositories,
 local sync database, pacman-key and bsdtar; downloaded packages are signature
 verified and unpacked privately, not installed. Read `omalab-setup --help` for
 the complete prerequisite check.
@@ -74,6 +74,11 @@ runtime requirements change. Recreate existing labs after an update; `restart`
 reloads the shell, not its compositor or generated environment. Old-format lab
 records are refused rather than migrated automatically; do not delete them
 blindly while their old processes may still be running.
+
+To add the native viewer to an existing runtime without rebuilding or stopping
+retained labs, run `omalab-setup --viewer`. It adds only the viewer dependency
+component; it does not replace core libraries, change lab state or repair your
+desktop. PyGObject (`python-gobject` on Arch) must already be available.
 
 ## Quick start
 
@@ -96,10 +101,14 @@ Tokyo Night theme and wallpaper, your plugin, and a provenance stamp. Bar
 widgets go into their manifest's `barWidget.defaultSection`; service plugins
 are enabled without needing a bar slot.
 
-Only show it when you want a normal TigerVNC window in your current desktop
-session (`DISPLAY`/XWayland is required by that viewer). Placement and focus
-follow your window-manager policy; omalab issues no host dispatches. Agents
-must obtain explicit permission for this task's visible inspection:
+Only show it when you want a normal native GTK window in your current desktop.
+Wayland is used when `WAYLAND_DISPLAY` is supplied. An explicit `DISPLAY` alone
+selects GTK's X11 backend. If neither is present, `show` recovers only display
+endpoint variables from `systemctl --user show-environment --output=json`,
+preferring Wayland. Explicit caller endpoints are never overwritten or guessed.
+Stale endpoints fail with diagnostics; omalab never restarts or repairs host
+XWayland. Placement/focus follow normal window-manager policy. Agents must
+obtain explicit permission for this task's visible inspection:
 
 ```sh
 omalab show -n dev
@@ -230,6 +239,24 @@ Commit/date refresh on shell startup; screenshot overrides update its geometry.
 Use `--no-stamp` on `up` for unstamped product images. This does not freeze the
 bar clock, weather, network data or your plugin's live content.
 
+## Short recordings
+
+```sh
+omalab record -n dev artifacts/demo.mp4 --duration 10
+```
+
+This records the current native lab output as a video-only H.264 MP4 at 30 fps.
+Duration defaults to 10 seconds and is limited to 1-300 seconds. One managed
+recording is allowed per lab; restart and geometry changes are blocked until it
+finishes. Use a background task when sending input concurrently, then wait for
+the command to finalize and validate the MP4 before using the file or tearing
+down the lab. `record.log` retains encoder diagnostics. No file argument writes
+`omalab-<name>.mp4` in the current directory.
+
+Unrestricted `exec` commands do not inherit these recording safeguards. A raw
+recorder can outlive the agent task while its lab remains alive. Prefer the
+bounded command, and do not equate sending a signal with verified finalization.
+
 ## Commands
 
 ```text
@@ -238,6 +265,7 @@ omalab up <plugin-dir> [-n NAME] [--theme NAME|mine] [--size WxH] [--scale N]
 omalab show [-n NAME]
 omalab hide [-n NAME]
 omalab shot [-n NAME] [FILE] [--scale N] [--size WxH]
+omalab record [-n NAME] [FILE] [--duration SECONDS]
 omalab ipc [-n NAME] <target> <method> [args...]
 omalab exec [-n NAME] <cmd...>
 omalab input [-n NAME] move X Y | click X Y | type TEXT | key CHORD
@@ -316,10 +344,9 @@ gives coding agents the safe development loop: unique labs, no unapproved
 and cleanup of only the lab they created.
 
 The skill also includes [video and input recipes](skills/omalab/automation.md).
-Recorders run through `exec` and export video from private storage. `omalab input`
-uses a persistent lab-local WayVNC connection so virtual devices remain available
-without a visible viewer; it never injects host input. There is no separate
-`omalab record` command.
+`omalab record` bounds recording lifetime and publishes a verified MP4.
+`omalab input` uses a persistent lab-local WayVNC connection so virtual devices
+remain available without a visible viewer; it never injects host input.
 
 For agents that read the shared user skill directory, after the CLI installation
 above:

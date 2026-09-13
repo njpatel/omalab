@@ -26,9 +26,19 @@ including a patched Aquamarine 0.14.0 / ABI 13 library and missing viewer/parent
 tools. It does not replace system libraries. Never export the sandbox's private
 library search path into the host desktop.
 
-The normal viewer and repeated show/hide were verified on a separate offscreen
-X server, not by opening an unapproved window on the user's desktop. Missing
-prerequisites are never permission to use the old host-output backend.
+The native GTK-VNC viewer and show/hide were verified on a separate owned
+Wayland lab, including with an unusable X11 DISPLAY. The existing runtime can
+gain viewer dependencies through `omalab-setup --viewer` without restarting
+retained labs. This preparation still requires authorization for dependency
+downloads. Missing prerequisites are never permission to use the old backend.
+
+Detached tool environments can differ from terminal environments. `show`
+recovers only missing graphical endpoints from the user session manager when
+neither display variable is provided; it does not require or infer HERDR_ENV.
+Prefer the normal tool/session environment. Do not inject a guessed DISPLAY,
+overwrite an explicit test display, restart XWayland or recreate its socket.
+The same existing lab can be retried after a viewer failure; no shell restart
+is required and transient plugin state should be preserved.
 
 ## Before acting
 
@@ -90,11 +100,13 @@ omalab down -n <unique-name>
 
 ## Video and input
 
-Use the [automation recipes](automation.md) for `wf-recorder` capture and
-`omalab input` move/click/type/key operations. Recorders run through `exec`;
-record to private storage, finalize, then export through stdout. Input uses the
-lab-local persistent controller and the same private WayVNC socket as the viewer.
-No visible viewer is necessary and no kernel-global injection is used.
+Use `omalab record` from the [automation recipes](automation.md) for video and
+`omalab input` for move/click/type/key operations. Recording is bounded (10s by
+default, at most 300s), singleton per lab, and publishes only after verified
+encoder exit and MP4 validation. Do not launch raw, unbounded `wf-recorder`
+jobs through `exec`; an agent task ending does not stop a retained lab.
+Wait for the actual recording result before another recording or teardown.
+Input uses the lab-local controller; no visible viewer or global injection is needed.
 
 Input coordinates are physical pixels in the original screenshot, including its
 scale. Focus fields within the child before typing and verify the resulting UI,

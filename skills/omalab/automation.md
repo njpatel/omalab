@@ -6,22 +6,31 @@ while recording. No visible viewer is required.
 
 ## Video
 
-Requires installed `wf-recorder` and an available encoder such as `libx264`.
-Record inside the lab, then export the finalized file through stdout. Arbitrary
-host paths are not mounted by `exec`.
+Use `omalab record`, not an unbounded `exec wf-recorder` background process.
+It requires `wf-recorder`, `ffprobe` and `libx264`, and writes a video-only MP4
+at the lab's current native resolution. The host destination is published only
+after the encoder exits successfully and the MP4 passes metadata validation.
 
 ```sh
 mkdir -p artifacts
-omalab exec -n "$lab" timeout --preserve-status --signal=INT --kill-after=5s 10s \
-  sh -c 'exec wf-recorder -o LAB -f "$HOME/lab-demo.mp4" -r 30 -x yuv420p \
-    -c libx264 -p preset=ultrafast -D'
-omalab exec -n "$lab" sh -c 'cat "$HOME/lab-demo.mp4"' > artifacts/lab-demo.mp4
+omalab record -n "$lab" artifacts/lab-demo.mp4 --duration 10
 ```
 
-Use the agent's background process facility for the recording when input needs
-to run concurrently. Keep the finite timeout. SIGINT lets the recorder finalize
-its MP4; wait for it to exit before exporting or tearing down the lab. Inspect
-actual decoded frames and media metadata, not merely file size.
+Duration defaults to 10 seconds and must be 1-300 seconds. Only one managed
+recording can own a lab at a time. Use a background job for the command when
+driving UI concurrently, then wait for its actual result before starting another.
+The recorder receives SIGINT at its deadline, with at most five seconds to
+finalize before a forced stop is reported as failure. A killed helper gives its
+encoder a parent-death SIGINT instead of leaving it orphaned in a retained lab.
+
+Shell restart and size/scale changes are refused while the managed recorder is
+active; ordinary input and same-geometry screenshots remain available. Finish
+the recording before `down`: destroying the namespace can abort a capture and
+prevent publication. Inspect actual decoded frames as well as metadata.
+
+An agent task ending is not the same as a retained lab ending. Raw `exec` is an
+escape hatch and bypasses the recording lock/deadline; do not use it to launch
+unbounded or duplicate recorders. Omalab does not kill unrelated raw recorders.
 
 This recipe is video-only. Do not enable microphone, webcam or host-audio capture
 without explicit authorization. Do not substitute the host desktop recorder.
@@ -79,7 +88,7 @@ Read its manual rather than trying unknown invocations on the host.
 
 ## Safety and completion
 
-- Use `omalab input -n "$lab"` for input and `omalab exec -n "$lab"` for recorders.
+- Use `omalab input -n "$lab"` for input and `omalab record -n "$lab"` for video.
 - Never substitute `ydotool`, `/dev/uinput`, host `xdotool`, desktop-global
   automation or an implicit host `hyprctl` command.
 - `show` still requires explicit permission for this task. Screenshots, video

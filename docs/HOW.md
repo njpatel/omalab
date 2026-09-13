@@ -37,9 +37,9 @@ remote resize and system-key grabs are disabled. The window is an ordinary
 client subject to the user's window-manager policy, not a specially dispatched
 host window. `hide` closes only that lab's recorded viewer; the desktop and
 private VNC server remain running. Visible inspection requires explicit user
-permission. The integrated viewer was tested on an offscreen X server without
-opening a window on the user's real desktop; placement/focus follow normal
-window-manager policy. TigerVNC needs `DISPLAY` (X11/XWayland) only for `show`.
+permission. The native GTK-VNC viewer was verified on a separate owned Wayland
+lab with X11 deliberately unavailable; the display compositor reported
+`xwayland:false`. It does not require TigerVNC or a working host XWayland socket.
 
 ## Private runtime and compatibility patch
 
@@ -48,8 +48,9 @@ Run `omalab-setup` before first use. Its default destination is
 override it for both setup and the CLI. The runtime contains:
 
 - `lib/libaquamarine.so.13`: patched Aquamarine v0.14.0;
-- `tools/usr/bin/{cage,wayvnc,vncviewer}` when the system lacks those tools,
+- `tools/usr/bin/{cage,wayvnc}` when the system lacks those tools,
   with their privately supplied library dependencies;
+- `viewer/tools/` for native GTK-VNC libraries when absent from the system;
 - `manifest.json` with `format: 1` and `aquamarineVersion: "0.14.0"`.
 
 The CLI resolves private tools before `PATH` and mounts the runtime read-only
@@ -61,12 +62,18 @@ packages and requires no sudo. There is no compilation on `up`.
 
 Setup targets Arch Linux x86_64 with installed Aquamarine 0.14.0 / ABI 13 and
 its development dependencies. It needs Git, curl, CMake, Ninja, a C++23 compiler,
-pkg-config, binutils, jq, flock and standard utilities. Missing Cage, WayVNC or
-TigerVNC tools are obtained from the configured pacman repositories using the
+pkg-config, binutils, jq, flock, Python/PyGObject and standard utilities. Missing
+Cage, WayVNC or GTK-VNC packages are obtained from configured repositories using the
 local sync database and verified package signatures; this additionally needs
 pacman-key and bsdtar. Setup does not refresh that database. See
 `omalab-setup --help` for the full prerequisite check. A valid existing runtime
 is reused; do not remove or replace one while labs use it.
+`omalab-setup --viewer` can add the separate native-viewer component to an
+existing runtime, including while labs use the core runtime. It publishes the
+new component atomically and leaves the core manifest/libraries and all lab
+directories untouched. It does not rebuild Aquamarine, install system packages
+or repair graphical services. `show` checks dependency availability without
+connecting to a display, and never downloads dependencies itself.
 
 The compatibility target is Hyprland 0.56.2, Quickshell 0.3.1 and Aquamarine
 0.14.0 (ABI 13). The patch in
@@ -212,11 +219,17 @@ not time-dependent content elsewhere in the shell.
 
 ## Video and child input
 
-Optional `wf-recorder` and input tools run through `exec` in the same child
-session. Record to private storage, finalize with SIGINT, then export through
-stdout before teardown. The [automation recipes](../skills/omalab/automation.md)
-cover that workflow and coordinate scaling. Video-only recording is not
-permission for microphone, webcam or host-audio capture.
+`record` runs a bounded video-only encoder in the lab and exports its validated
+MP4 through stdout to an atomic host destination. It defaults to 10 seconds,
+accepts 1-300 seconds, and uses a per-lab `flock` also respected by shell restart
+and geometry-changing screenshots. The helper sends SIGINT at the deadline,
+waits up to five seconds, treats forced termination as failure, and checks the
+actual encoder return code and `ffprobe` metadata before exporting bytes.
+The child inherits the lock and a Linux parent-death SIGINT, so killing the
+recording helper does not leave an encoder running in a retained namespace.
+Raw `exec` remains unrestricted and bypasses this managed-recorder policy.
+An agent task ending does not end the lab; namespace teardown is the separate
+lifecycle boundary. Finish recordings before teardown to preserve their files.
 
 A headless seat has no physical pointer or keyboard. `support/input.py` holds
 a persistent RFB connection to the private WayVNC socket, keeping virtual
@@ -332,3 +345,87 @@ The normal CLI was exercised after replacing the host-output backend:
   were removed. Host output geometry matched the initial baseline. ShellCheck
   and Bash syntax validation passed for the CLI, setup and smoke helper;
   the Python input helper's syntax was validated without generated repository files.
+
+### Native viewer recovery and readiness
+
+A retained, healthy lab exposed two distinct frontend failures. A detached
+tool process lacked `DISPLAY`; after an observed `:0` was supplied, the old
+TigerVNC process still could not connect to that X11 endpoint. A running
+XWayland PID did not establish that its socket was usable. The cause of the
+host socket's absence was not established, and no host recovery was attempted.
+
+The viewer is now `support/viewer.py`, using GTK-VNC/PyGObject with native
+Wayland support. It opens only the chosen lab's Unix VNC socket, sets shared
+connection mode, disables keyboard/pointer grabs and grab hotkeys, preserves
+aspect ratio, and disables remote resizing and lossy encoding. It installs no
+clipboard-transfer, audio, host-launch or fullscreen hooks. The VNC transport
+and existing lab services do not need to restart.
+
+Environment precedence is explicit:
+
+1. A caller-supplied `WAYLAND_DISPLAY` selects Wayland, even with an unusable
+   `DISPLAY`. Its absolute/resolved socket must exist and belong to the user.
+2. A caller-supplied `DISPLAY` alone selects GTK's X11 backend. It is not
+   silently redirected to a different desktop.
+3. Only when both are absent does the helper read structured JSON from
+   `systemctl --user show-environment --output=json`. It extracts only
+   `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_RUNTIME_DIR` and `XAUTHORITY`, preserves
+   nonempty caller values, and prefers recovered Wayland. It never evaluates
+   shell output, imports arbitrary manager secrets, infers a socket from the
+   lab, or depends on a terminal-multiplexer marker.
+
+`Gtk.init_check` handles an unavailable display without a repair attempt.
+The window maps only after VNC initialization, and `viewer.ready` is written
+only after both the first framebuffer update and native map. `show` waits for
+that PID-matched readiness record; process liveness alone is not success.
+Failures retain `viewer.log` and the lab. Repeated show checks the same readiness
+condition, and hide terminates only the recorded viewer process.
+
+Verification used two task-owned headless labs: one provided source pixels and
+one was the viewer's display server. With `DISPLAY=:9999` deliberately unusable,
+show reported native Wayland readiness; the display server listed
+`class=omalab-viewer`, `xwayland=false`. Its actual framebuffer was captured and
+inspected. Mouse clicks and normal key events delivered through the widget
+changed a real test field/button in the source lab. Repeated show did not create
+a second window. Hide removed the native window while source IPC still answered.
+
+Explicit stale Wayland and unusable X11 destinations returned failures, did not
+produce readiness records, and did not redirect to the user's desktop. Six
+environment regression tests cover caller precedence, manager-only recovery,
+secret exclusion, stale endpoints, unavailable manager and stale runtime values.
+The native viewer's fresh startup log was clean. Existing worker-owned lab
+processes, configuration and diagnostics were left untouched; no host XWayland
+restart, socket recreation, focus dispatch, monitor change, push or publication
+was part of this correction.
+
+### Managed recorder lifecycle
+
+Long-lived and duplicate recorders were reported after worker tasks completed.
+The code previously provided only unrestricted `exec` plus a suggested timeout
+recipe; it did not automatically spawn duplicate recorders, but neither a
+singleton lock nor a deadline was enforced by the CLI. A retained namespace
+can outlive an agent task, and multiple commands can share its parent/reaper.
+Shared PPID alone does not identify who launched a duplicate.
+
+`omalab record` now owns a bounded recorder: one per lab, default duration 10
+seconds, allowed range 1-300. It inherits a per-lab flock into the encoder and
+sets a Linux parent-death SIGINT. At normal deadline/early SIGINT it waits for
+the actual encoder exit, validates H.264 dimensions/duration using ffprobe, then
+exports and atomically publishes the MP4. Forced termination or failed validation
+returns failure without a success artifact. Restart and size/scale changes use
+the same lock, while input and unchanged-geometry screenshots remain available.
+
+Verification used a separate task-owned 640x400 lab. A six-second recording
+finished in approximately 6.3 seconds and ffprobe reported a 5.90-second H.264
+video; decoded frames were inspected. A second recording and a shell restart
+were rejected during capture, with no partial duplicate destination left.
+After recording, restart and resized capture worked again. An early SIGINT
+finalized a shorter valid MP4. Killing only the owned recording helper with
+SIGKILL caused its encoder to exit; the command returned 137 and published no
+success artifact. Process inspection matched exact executable argv inside the
+owned namespace, not a grep pipeline that could match itself.
+
+Raw `exec wf-recorder` is still an escape hatch and can bypass this policy.
+The skill now directs agents to the managed command, to await actual completion,
+and to finish recording before namespace teardown. No existing worker recorder,
+retained lab, host desktop or power profile was modified for these tests.

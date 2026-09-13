@@ -10,6 +10,7 @@ Usage: omalab up <plugin-dir> [-n NAME] [--theme NAME|mine] [--size WxH]
        omalab show [-n NAME]
        omalab hide [-n NAME]
        omalab shot [-n NAME] [FILE] [--scale N] [--size WxH]
+       omalab record [-n NAME] [FILE] [--duration SECONDS]
        omalab ipc [-n NAME] <target> <method> [args...]
        omalab exec [-n NAME] <cmd...>
        omalab input [-n NAME] move X Y | click X Y | type TEXT | key CHORD
@@ -25,6 +26,7 @@ Plugin directories are live read-only mounts. exec starts in the scratch HOME.
 Network and host services are isolated unless --network or --shared-bus is requested.
 Scale-changing shots restart the lab shell and reset transient plugin state.
 Input coordinates are original framebuffer pixels; type supports Unicode text.
+record is video-only, defaults to 10s, and permits one managed recorder per lab.
 HELP
 }
 
@@ -50,7 +52,7 @@ process_start() {
 }
 record_pid() {
   local role=$1 pid=$2 start tmp=$PID_FILE.next
-  start=$(process_start "$pid") || fail "$role exited during startup"
+  start=$(process_start "$pid") || fail "$role exited during startup; inspect $LAB/$role.log"
   if [[ -f $PID_FILE ]]; then
     while read -r old_role old_pid old_start; do
       [[ $old_role == "$role" ]] || printf '%s %s %s\n' "$old_role" "$old_pid" "$old_start"
@@ -115,7 +117,7 @@ run_lab() {
   "${exec_prefix[@]}" nsenter --target="$keeper" --user --mount --pid "${net_args[@]}" --ipc --uts \
     --preserve-credentials --root --wdns=/lab/home -- \
     /usr/bin/env -i PATH=/usr/bin:/omarchy/bin:/runtime/tools/usr/bin \
-      OMALAB_INSIDE=1 /bin/bash /runner _run "$@" 9>&-
+      OMALAB_INSIDE=1 /bin/bash /runner _run "$@" 7>&- 9>&-
 }
 
 inside_environment() {
@@ -446,21 +448,44 @@ CONFIG
 show_lab() {
   load_lab
   namespace_alive || fail 'lab is not running'
-  if role_alive viewer; then printf 'Viewer for %s is already open\n' "$NAME"; return; fi
-  [[ -n ${DISPLAY:-} ]] || fail 'show needs a graphical session with DISPLAY for the TigerVNC viewer; run show from your desktop terminal'
+  if role_alive viewer; then
+    if [[ -f $LAB/viewer.ready ]] && jq -e --argjson pid "$ROLE_PID" '.pid==$pid and .framebufferWidth>0 and .framebufferHeight>0' "$LAB/viewer.ready" >/dev/null; then
+      printf 'Viewer for %s is already connected\n' "$NAME"
+      return
+    fi
+    fail "viewer process exists but is not ready; inspect $LAB/viewer.log before retrying"
+  fi
   [[ -S $LAB/run/viewer.sock ]] || fail 'lab viewer socket unavailable'
   RUNTIME_ROOT=$(jq -er .runtimeRoot "$LAB/meta.json")
-  local viewer
-  viewer=$(runtime_binary vncviewer) || fail 'vncviewer is unavailable; run omalab-setup'
+  local helper=${SELF%/*}/../support/viewer.py environment key value attempt pid
+  local -a viewer_env=(env -u PYTHONPATH -u WAYLAND_SOCKET -u WAYLAND_DISPLAY -u DISPLAY -u XAUTHORITY
+    "PYTHONNOUSERSITE=1" "GI_TYPELIB_PATH=$RUNTIME_ROOT/viewer/tools/usr/lib/girepository-1.0"
+    "LD_LIBRARY_PATH=$RUNTIME_ROOT/viewer/tools/usr/lib")
+  "${viewer_env[@]}" python3 "$helper" --check || fail 'native viewer unavailable; run omalab-setup --viewer (existing labs can remain running)'
+  environment=$(python3 "$helper" --environment) || fail 'no usable viewer display endpoint; the lab remains running'
+  viewer_env+=("GDK_BACKEND=$(jq -er .backend <<< "$environment")")
+  for key in WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR XAUTHORITY; do
+    value=$(jq -r --arg key "$key" '.[$key] // empty' <<< "$environment")
+    [[ -z $value ]] || viewer_env+=("$key=$value")
+  done
   mkdir -p "$LAB/viewer-home/.config" "$LAB/viewer-home/.local/state" "$LAB/viewer-home/.cache"
-  launch_external viewer env HOME="$LAB/viewer-home" XDG_CONFIG_HOME="$LAB/viewer-home/.config" XDG_STATE_HOME="$LAB/viewer-home/.local/state" XDG_CACHE_HOME="$LAB/viewer-home/.cache" \
-    LD_LIBRARY_PATH="$RUNTIME_ROOT/tools/usr/lib" "$viewer" \
-    -AcceptClipboard=0 -SendClipboard=0 -SendPrimary=0 -SetPrimary=0 -RemoteResize=0 \
-    -FullScreen=0 -Maximize=0 -FullscreenSystemKeys=0 -ReconnectOnError=0 -AlertOnFatalError=0 \
-    -Shared=1 -NoJPEG=1 -SecurityTypes None -geometry "$SIZE" "$LAB/run/viewer.sock"
-  sleep 0.2
-  role_alive viewer || fail 'viewer exited; inspect viewer.log'
-  printf 'Viewer opened for %s; close it with omalab hide -n %s\n' "$NAME" "$NAME"
+  rm -f -- "$LAB/viewer.ready" "$LAB/viewer.ready.next"
+  launch_external viewer "${viewer_env[@]}" HOME="$LAB/viewer-home" XDG_CONFIG_HOME="$LAB/viewer-home/.config" \
+    XDG_STATE_HOME="$LAB/viewer-home/.local/state" XDG_CACHE_HOME="$LAB/viewer-home/.cache" \
+    python3 "$helper" --socket "$LAB/run/viewer.sock" --name "$NAME" \
+    --width "${SIZE%x*}" --height "${SIZE#*x}" --ready-file "$LAB/viewer.ready"
+  read -r pid < "$LAB/viewer.pid"
+  for ((attempt=0; attempt<150; attempt++)); do
+    role_alive viewer || fail "native viewer exited before connection readiness; inspect $LAB/viewer.log (lab retained; no host repair attempted)"
+    if [[ -f $LAB/viewer.ready ]] && jq -e --argjson pid "$pid" '.pid==$pid and .framebufferWidth>0 and .framebufferHeight>0' "$LAB/viewer.ready" >/dev/null; then
+      printf 'Viewer connected for %s via %s (%s environment); close with omalab hide -n %s\n' \
+        "$NAME" "$(jq -r .backend <<< "$environment")" "$(jq -r .source <<< "$environment")" "$NAME"
+      return 0
+    fi
+    sleep 0.1
+  done
+  stop_role viewer
+  fail "native viewer did not become ready; inspect $LAB/viewer.log (lab retained)"
 }
 hide_lab() { load_lab; stop_role viewer; printf 'Viewer closed for %s\n' "$NAME"; }
 destroy_lab() {
@@ -469,7 +494,13 @@ destroy_lab() {
   if role_alive namespace; then fail 'namespace is still alive; refusing to remove its state'; fi
   rm -rf -- "$LAB"
 }
+recording_exclusion() {
+  exec 7>"$LAB/run/record.lock"
+  flock -n 7 || fail 'a recording is active in this lab; finish it before changing shell/geometry'
+}
+
 restart_lab() {
+  recording_exclusion
   update_stamp
   run_lab /bin/bash /runner _restart
   printf 'Restarted %s\n' "$NAME"
@@ -525,7 +556,7 @@ shot() {
     SHOT_RESTART=1; printf 'omalab: scale change restarts the lab shell; transient state resets\n' >&2
   fi
   trap restore_shot EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
-  if [[ $SIZE != "$SHOT_SIZE" || $SCALE != "$SHOT_SCALE" ]]; then SHOT_CHANGED=1; shot_geometry; fi
+  if [[ $SIZE != "$SHOT_SIZE" || $SCALE != "$SHOT_SCALE" ]]; then recording_exclusion; SHOT_CHANGED=1; shot_geometry; fi
   SHOT_TEMP=$(mktemp -- "$file.XXXXXX")
   # Only the PNG bytes cross the boundary; the child cannot write host paths.
   run_lab timeout 15 grim -o LAB - > "$SHOT_TEMP"
@@ -534,6 +565,31 @@ shot() {
   trap - EXIT INT TERM
   printf '%s\n' "$file"
 }
+record_video() {
+  load_lab
+  local file='' duration=10
+  while (( $# )); do
+    case $1 in
+      --duration) [[ $# -ge 2 ]] || fail 'missing recording duration'; duration=$2; shift 2 ;;
+      --) shift; [[ $# == 1 && -z $file ]] || fail 'record takes one file'; file=$1; shift ;;
+      -*) fail "unknown record option: $1" ;;
+      *) [[ -z $file ]] || fail 'record takes one file'; file=$1; shift ;;
+    esac
+  done
+  if [[ ! $duration =~ ^[1-9][0-9]{0,2}$ ]] || (( 10#$duration > 300 )); then fail 'duration must be 1-300 seconds'; fi
+  file=$(realpath -m -- "${file:-omalab-$NAME.mp4}")
+  [[ -d ${file%/*} && ! -d $file ]] || fail 'invalid recording destination'
+  namespace_alive || fail 'lab is not running'
+  RECORD_TEMP=$(mktemp -- "$file.XXXXXX")
+  trap 'rm -f -- "$RECORD_TEMP"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  run_lab python3 /support/record.py --duration "$duration" > "$RECORD_TEMP"
+  mv -f -- "$RECORD_TEMP" "$file"
+  trap - EXIT INT TERM
+  printf '%s\n' "$file"
+}
+
 list_labs() {
   printf 'NAME\tPLUGIN\tSIZE@SCALE\tTHEME\tAGE\tSTATE\n'
   local meta state now
@@ -569,6 +625,7 @@ if [[ ${1:-} == -n ]]; then [[ $# -ge 2 ]] || fail 'missing lab name'; NAME=$2; 
 case $COMMAND in
   show|hide) [[ $# == 0 ]] || fail "$COMMAND takes only -n NAME"; if [[ $COMMAND == show ]]; then show_lab; else hide_lab; fi ;;
   shot) shot "$@" ;;
+  record) record_video "$@"; exit ;;
   ipc) [[ $# -ge 2 ]] || fail 'ipc requires target and method'; load_lab; run_lab omarchy-shell "$@" ;;
   exec) [[ $# -gt 0 ]] || fail 'exec requires a command'; load_lab; run_lab "$@" ;;
   input) [[ $# -gt 0 ]] || fail 'input requires an operation'; load_lab; namespace_alive || fail 'lab is not running'; python3 "${SELF%/*}/../support/input.py" request "$LAB/run/input.sock" "$@" ;;
