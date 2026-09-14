@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "omalab.stamp",
   "name": "Omalab stamp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Omalab contributors",
   "license": "Apache-2.0",
   "description": "A click-through lab provenance stamp on the wallpaper.",
